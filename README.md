@@ -17,9 +17,19 @@
 
 ---
 
+## Changelog
+
+**April 26, 2026 — The "Constellation" Update**
+- **Massive 35-Tool Expansion:** Merged in the complete Phase 2 toolset from the internal workspace.
+- **Options (VoPR™ Engine):** Added `analyze_options_setup`, `find_best_to_sell`, `find_best_to_buy`, and `sweep_setups` for intelligent options grading.
+- **Institutional Flow:** Native TraderDaddy integration for real-time unusual activity, Gamma Exposure (GEX), and sector rotation.
+- **Backtesting Suite:** 6 technical presets with walk-forward validation and multi-ticker sweeping via `backtest_strategy` and `sweep_strategy`.
+- **Macro & Environment:** Added `detect_macro_regime`, `analyze_breadth`, `detect_bubble_risk`, and `get_market_environment`.
+- **Knowledge Base:** Added `search_knowledge` RAG tool to search across 139 trading books.
+
 ## What Is This?
 
-**momentum-mcp** turns any MCP-compatible AI assistant into a quantitative trading analyst. Instead of copy-pasting tickers into Yahoo Finance and screenshotting charts, your AI agent can:
+**momentum-mcp** turns any MCP-compatible AI assistant into a quantitative trading analyst. Instead of copy-pasting tickers into Yahoo Finance and screenshotting charts, your AI agent has access to 35 institutional-grade tools to:
 
 - 🔍 **Screen the entire market** in seconds — find overbought stocks, unusual volume spikes, new 52-week highs
 - 📊 **Pull clean OHLCV data** for any ticker, any timeframe — ready for analysis, no CSV wrangling
