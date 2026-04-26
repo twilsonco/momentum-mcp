@@ -158,32 +158,49 @@ async def generate_chart(
             "type": "candle",
             "style": _STYLE,
             "volume": True,
-            "title": f"\n{ticker}  ({period} / {interval})",
             "figsize": (14, 8),
             "tight_layout": True,
             "warn_too_much_data": 500,
+            "returnfig": True,  # Get fig/axes back for legend
         }
 
         if ema_plots:
             plot_kwargs["addplot"] = ema_plots
 
-        # Render to file
-        mpf.plot(
-            df,
-            **plot_kwargs,
-            savefig=dict(fname=str(filepath), dpi=150, bbox_inches="tight"),
-        )
+        fig, axes = mpf.plot(df, **plot_kwargs)
 
-        # Render to in-memory buffer for base64
+        # Add EMA legend to price panel (axes[0])
+        if ema_periods_used:
+            import matplotlib.lines as mlines
+            legend_handles = []
+            for ema_len, color, label in _EMA_STACK:
+                if ema_len in ema_periods_used:
+                    legend_handles.append(
+                        mlines.Line2D([], [], color=color, linewidth=1.2, label=label)
+                    )
+            if legend_handles:
+                axes[0].legend(
+                    handles=legend_handles,
+                    loc="upper left",
+                    fontsize=8,
+                    framealpha=0.3,
+                    facecolor="#1a1a1a",
+                    edgecolor="#333333",
+                    labelcolor="#cccccc",
+                )
+
+        # Save to buffer
         buf = io.BytesIO()
-        mpf.plot(
-            df,
-            **plot_kwargs,
-            savefig=dict(fname=buf, dpi=150, bbox_inches="tight"),
-        )
+        fig.savefig(buf, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
         buf.seek(0)
-        b64 = base64.b64encode(buf.read()).decode("utf-8")
+        raw_bytes = buf.read()
+        import matplotlib.pyplot as plt
+        plt.close(fig)
 
+        # Write the same bytes to disk for download
+        filepath.write_bytes(raw_bytes)
+
+        b64 = base64.b64encode(raw_bytes).decode("utf-8")
         return str(filepath.resolve()), b64
 
     path, b64_str = await asyncio.to_thread(_render)

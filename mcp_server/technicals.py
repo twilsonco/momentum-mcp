@@ -13,85 +13,198 @@ from typing import Any
 import pandas as pd
 import pandas_ta as ta
 
-from mcp_server.data import get_historical_data
+from mcp_server.data import get_historical_data, get_live_price
 
 logger = logging.getLogger(__name__)
 
+from mcp_server.cache import smart_cache
+from mcp_server.schema import SignalResult
 
+
+@smart_cache(open_ttl=300, closed_ttl=3600)
 async def analyze_technicals(
     ticker: str,
-    period: str = "6mo",
-) -> dict[str, Any]:
-    """Compute RSI and MACD for a ticker and return the latest values.
+    period: str = "1y",
+) -> SignalResult:
+    """Compute a full technical indicator suite for a ticker.
 
-    Fetches daily OHLCV data for the requested *period*, applies the
-    **RSI(14)** and **MACD(12, 26, 9)** indicators via ``pandas-ta``,
-    and returns the most recent readings together with price context.
+    Fetches daily OHLCV data and applies:
+    - **RSI(14)** — Relative Strength Index
+    - **MACD(12, 26, 9)** — Moving Average Convergence Divergence
+    - **EMA Stack (8/21/34/55/89)** — Michael's signature momentum stack
+    - **SMA (50/100/200)** — Classic long-term trend levels
+    - **ADX(14)** — Average Directional Index (trend strength)
+    - **ATR(14)** — Average True Range (volatility)
+    - **Williams %R(14)** — Williams Percent Range
+    - **Stochastic (14,3,3)** — %K and %D
+    - **Bollinger Bands (20,2)** — Upper/Middle/Lower
+    - **CCI(20)** — Commodity Channel Index
 
     Args:
         ticker: Stock ticker symbol (e.g. ``"AAPL"``).
-        period: Lookback period for the underlying data. Defaults to
-            ``"6mo"`` which provides enough bars for reliable indicator
-            calculation. Accepted values match :func:`get_historical_data`.
+        period: Lookback period. Defaults to ``"6mo"``.
 
     Returns:
-        A dict with:
-
-        - ``ticker`` — The requested symbol.
-        - ``date`` — ISO-formatted date of the latest bar.
-        - ``close`` — Most recent closing price.
-        - ``rsi_14`` — Current RSI(14) value (0–100), or ``null``.
-        - ``macd`` — MACD line value, or ``null``.
-        - ``macd_signal`` — Signal line value, or ``null``.
-        - ``macd_histogram`` — Histogram value, or ``null``.
-        - ``analysis`` — A plain-English summary of the current readings.
-
-    Raises:
-        ValueError: If the ticker symbol is invalid or returns no data.
+        A SignalResult with all indicator values + a plain-English summary.
     """
     ticker = ticker.strip().upper()
 
-    # Fetch OHLCV data (already validated inside data module)
-    records = await get_historical_data(ticker, period=period, interval="1d")
+    try:
+        # Fetch OHLCV data (already validated inside data module)
+        records = await get_historical_data(ticker, period=period, interval="1d")
 
-    if len(records) < 35:
-        raise ValueError(
-            f"Insufficient data for '{ticker}': got {len(records)} bars but "
-            f"need ≥35 for MACD(26) + signal(9). Try a longer period."
+        if len(records) < 35:
+            return SignalResult.error_msg(
+                f"Insufficient data for '{ticker}': got {len(records)} bars but "
+                f"need ≥35 for reliable indicators. Try a longer period."
+            )
+
+        df = pd.DataFrame(records)
+        close = pd.to_numeric(df["close"], errors="coerce")
+        high = pd.to_numeric(df["high"], errors="coerce")
+        low = pd.to_numeric(df["low"], errors="coerce")
+        volume = pd.to_numeric(df["volume"], errors="coerce")
+
+        # Extract the latest bar info
+        latest = df.iloc[-1]
+        latest_date = latest["date"]
+
+        # Use live price — OHLCV close is stale during market hours
+        try:
+            latest_close = await get_live_price(ticker)
+        except Exception:
+            latest_close = latest["close"]
+
+        # --- Core Oscillators ---
+        rsi_series = ta.rsi(close, length=14)
+        rsi_val = _extract_last(rsi_series)
+        rsi_prev = _extract_at(rsi_series, -2)  # Previous bar RSI for cross detection
+
+        macd_df = ta.macd(close, fast=12, slow=26, signal=9)
+        macd_val = _extract_last(macd_df.iloc[:, 0]) if macd_df is not None else None
+        macd_prev = _extract_at(macd_df.iloc[:, 0], -2) if macd_df is not None else None
+        signal_val = _extract_last(macd_df.iloc[:, 1]) if macd_df is not None else None
+        signal_prev = _extract_at(macd_df.iloc[:, 1], -2) if macd_df is not None else None
+        hist_val = _extract_last(macd_df.iloc[:, 2]) if macd_df is not None else None
+
+        # --- EMA Stack (8/21/34/55/89) — Michael's signature ---
+        ema_stack = {}
+        for length in [8, 21, 34, 55, 89]:
+            ema_stack[f"ema_{length}"] = _extract_last(ta.ema(close, length=length))
+
+        # --- SMA (50/100/200) ---
+        sma_50 = _extract_last(ta.sma(close, length=50))
+        sma_100 = _extract_last(ta.sma(close, length=100))
+        sma_200 = _extract_last(ta.sma(close, length=200))
+
+        # --- ADX(14) — trend strength + DI components ---
+        adx_df = ta.adx(high, low, close, length=14)
+        adx_val = _extract_last(adx_df.iloc[:, 0]) if adx_df is not None else None
+        # DI+ and DI- for directional movement (columns: ADX, DMP, DMN)
+        plus_di = _extract_last(adx_df.iloc[:, 1]) if adx_df is not None and adx_df.shape[1] > 1 else None
+        minus_di = _extract_last(adx_df.iloc[:, 2]) if adx_df is not None and adx_df.shape[1] > 2 else None
+        plus_di_prev = _extract_at(adx_df.iloc[:, 1], -2) if adx_df is not None and adx_df.shape[1] > 1 else None
+        minus_di_prev = _extract_at(adx_df.iloc[:, 2], -2) if adx_df is not None and adx_df.shape[1] > 2 else None
+
+        # --- ATR(14) — volatility ---
+        atr_val = _extract_last(ta.atr(high, low, close, length=14))
+
+        # --- Williams %R(14) ---
+        willr_val = _extract_last(ta.willr(high, low, close, length=14))
+
+        # --- Stochastic (14,3,3) ---
+        stoch_df = ta.stoch(high, low, close, k=14, d=3, smooth_k=3)
+        stoch_k = _extract_last(stoch_df.iloc[:, 0]) if stoch_df is not None else None
+        stoch_d = _extract_last(stoch_df.iloc[:, 1]) if stoch_df is not None else None
+
+        # --- Bollinger Bands (20, 2) ---
+        bb_df = ta.bbands(close, length=20, std=2)
+        bb_lower = _extract_last(bb_df.iloc[:, 0]) if bb_df is not None else None
+        bb_mid = _extract_last(bb_df.iloc[:, 1]) if bb_df is not None else None
+        bb_upper = _extract_last(bb_df.iloc[:, 2]) if bb_df is not None else None
+
+        # --- CCI(20) ---
+        cci_val = _extract_last(ta.cci(high, low, close, length=20))
+
+        # --- Volume metrics (for spike detection) ---
+        vol_current = _extract_last(volume)
+        vol_prev = _extract_at(volume, -2)
+        vol_sma_20 = _extract_last(ta.sma(volume, length=20))
+
+        # --- Previous close (for EMA breakout detection) ---
+        close_prev = _extract_at(close, -2)
+
+        # --- EMA Stack state ---
+        ema_vals = [ema_stack.get(f"ema_{l}") for l in [8, 21, 34, 55, 89]]
+        ema_stack_bullish = (
+            all(v is not None for v in ema_vals)
+            and all(ema_vals[i] > ema_vals[i + 1] for i in range(len(ema_vals) - 1))
         )
 
-    df = pd.DataFrame(records)
-    df["close_float"] = pd.to_numeric(df["close"], errors="coerce")
+        # Build analysis
+        analysis = _build_analysis(ticker, latest_close, rsi_val, macd_val, signal_val, hist_val)
 
-    # --- RSI(14) ---
-    rsi_series = ta.rsi(df["close_float"], length=14)
+        # Note missing SMAs so the LLM explains WHY, not just "null"
+        sma_notes = []
+        bars_available = len(records)
+        if sma_200 is None and bars_available < 200:
+            sma_notes.append(f"SMA(200) unavailable — only {bars_available} trading days of history (need 200)")
+        if sma_100 is None and bars_available < 100:
+            sma_notes.append(f"SMA(100) unavailable — only {bars_available} trading days of history (need 100)")
 
-    # --- MACD(12, 26, 9) ---
-    macd_df = ta.macd(df["close_float"], fast=12, slow=26, signal=9)
+        data = {
+            "ticker": ticker,
+            "date": latest_date,
+            "close": latest_close,
+            # Core oscillators
+            "rsi_14": rsi_val,
+            "rsi_14_prev": rsi_prev,
+            "macd": macd_val,
+            "macd_prev": macd_prev,
+            "macd_signal": signal_val,
+            "macd_signal_prev": signal_prev,
+            "macd_histogram": hist_val,
+            # EMA stack (8/21/34/55/89)
+            **ema_stack,
+            "ema_stack_bullish": ema_stack_bullish,
+            # SMAs
+            "sma_50": sma_50,
+            "sma_100": sma_100,
+            "sma_200": sma_200,
+            # Trend & volatility
+            "adx_14": adx_val,
+            "plus_di": plus_di,
+            "minus_di": minus_di,
+            "plus_di_prev": plus_di_prev,
+            "minus_di_prev": minus_di_prev,
+            "atr_14": atr_val,
+            # Momentum oscillators
+            "williams_r_14": willr_val,
+            "stoch_k": stoch_k,
+            "stoch_d": stoch_d,
+            "cci_20": cci_val,
+            # Bollinger Bands
+            "bb_upper": bb_upper,
+            "bb_mid": bb_mid,
+            "bb_lower": bb_lower,
+            # Volume
+            "volume": vol_current,
+            "volume_prev": vol_prev,
+            "vol_sma_20": vol_sma_20,
+            # Previous close
+            "close_prev": close_prev,
+            # Summary
+            "analysis": analysis,
+        }
 
-    # Extract the latest values
-    latest = df.iloc[-1]
-    latest_date = latest["date"]
-    latest_close = latest["close"]
+        if sma_notes:
+            data["data_notes"] = sma_notes
 
-    rsi_val = _extract_last(rsi_series)
-    macd_val = _extract_last(macd_df.iloc[:, 0]) if macd_df is not None else None
-    signal_val = _extract_last(macd_df.iloc[:, 1]) if macd_df is not None else None
-    hist_val = _extract_last(macd_df.iloc[:, 2]) if macd_df is not None else None
+        return SignalResult.success(data)
 
-    # Build a plain-English summary
-    analysis = _build_analysis(ticker, latest_close, rsi_val, macd_val, signal_val, hist_val)
-
-    return {
-        "ticker": ticker,
-        "date": latest_date,
-        "close": latest_close,
-        "rsi_14": rsi_val,
-        "macd": macd_val,
-        "macd_signal": signal_val,
-        "macd_histogram": hist_val,
-        "analysis": analysis,
-    }
+    except Exception as e:
+        logger.error("Technicals failed for %s: %s", ticker, e)
+        return SignalResult.error_msg(str(e))
 
 
 # ---------------------------------------------------------------------------
@@ -100,12 +213,28 @@ async def analyze_technicals(
 
 def _extract_last(series: pd.Series | None) -> float | None:
     """Get the last non-NaN value from a series, rounded."""
+    return _extract_at(series, -1)
+
+
+def _extract_at(series: pd.Series | None, idx: int = -1) -> float | None:
+    """Get the value at a specific index from a series, rounded.
+
+    Args:
+        series: A pandas Series (e.g., RSI values over time).
+        idx: The index position (negative for from-end, e.g. -2 = second-to-last).
+
+    Returns:
+        Rounded float value, or None if unavailable.
+    """
     if series is None or series.empty:
         return None
-    val = series.iloc[-1]
-    if pd.isna(val):
+    try:
+        val = series.iloc[idx]
+        if pd.isna(val):
+            return None
+        return round(float(val), 4)
+    except (IndexError, KeyError):
         return None
-    return round(float(val), 4)
 
 
 def _build_analysis(
