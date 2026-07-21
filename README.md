@@ -210,6 +210,24 @@ claude mcp list
 
 ---
 
+### Hermes Agent
+
+Add to your Hermes Agent config at `~/.hermes/config.yaml`:
+
+```yaml
+mcp_servers:
+  momentum:
+    command: /absolute/path/to/momentum-mcp/.venv/bin/python
+    args:
+      - -m
+      - mcp_server.server
+    env:
+      MCP_TRANSPORT: "stdio"
+      PYTHONPATH: /absolute/path/to/momentum-mcp
+```
+
+---
+
 ### Any Other MCP Client
 
 momentum-mcp uses the **stdio** transport (the MCP default). Any client that supports stdio can connect by running:
