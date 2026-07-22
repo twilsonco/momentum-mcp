@@ -176,7 +176,9 @@ def trading_assistant() -> str:
 @mcp.tool()
 async def run_stock_screen(
     preset: str = "most_active",
+    market: str = "america",
     limit: int = 25,
+    extra_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run a stock screen using TradingView's scanner.
 
@@ -185,8 +187,14 @@ async def run_stock_screen(
     high_momentum, large_cap_undervalued, top_gainers, biggest_losers,
     most_volatile, pre_market_gainers, pre_market_losers, pre_market_active,
     pre_market_gappers, after_hours_gainers, after_hours_losers, after_hours_active.
+
+    Args:
+        preset: Screen preset (see above).
+        market: TradingView market — 'america' (default), 'uk', 'europe', 'asia', etc.
+        limit: Max results (1-100). Default: 25.
+        extra_columns: Additional TradingView field names to include beyond defaults.
     """
-    return await _run_stock_screen(preset=preset, limit=limit)
+    return await _run_stock_screen(preset=preset, market=market, limit=limit, extra_columns=extra_columns)
 
 
 @mcp.tool()
@@ -194,6 +202,7 @@ async def run_custom_screen(
     filters: list[dict[str, Any]],
     sort_by: str = "volume",
     sort_ascending: bool = False,
+    market: str = "america",
     limit: int = 25,
 ) -> dict[str, Any]:
     """Build a custom stock screen with dynamic filter conditions.
@@ -202,8 +211,18 @@ async def run_custom_screen(
     Fields: RSI, ADX, ATR, EMA5-200, SMA5-200, MACD.macd, MACD.signal,
     BB.upper, BB.lower, Stoch.K, Stoch.D, CCI20, W.R, volume, close,
     change, gap, market_cap_basic, Aroon.Up, Aroon.Down, VWAP, MoneyFlow.
+
+    Args:
+        filters: List of {field, operator, value} dicts.
+        sort_by: Field to sort by. Default: 'volume'.
+        sort_ascending: Sort direction. Default: False (descending).
+        market: TradingView market. Default: 'america'.
+        limit: Max results (1-100). Default: 25.
     """
-    return await _run_custom_screen(filters=filters, sort_by=sort_by, sort_ascending=sort_ascending, limit=limit)
+    return await _run_custom_screen(
+        filters=filters, sort_by=sort_by, sort_ascending=sort_ascending,
+        market=market, limit=limit,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -300,34 +319,73 @@ async def generate_chart(
 @mcp.tool()
 async def analyze_options_setup(
     ticker: str, option_type: str = "put", dte: int = 30,
+    expiration: str | None = None, strike: float | None = None,
     budget: float | None = None, contracts: int = 1,
+    risk_free_rate: float = 0.05,
     iv_override: float | None = None,
 ) -> dict[str, Any]:
     """VoPR™ engine: composite realized vol (4 estimators), VRP ratio,
     Black-Scholes Delta/Theta, A-F grade. Use when you need a specific
-    DTE/strike analysis. Pass budget for strike recommendations."""
+    DTE/strike analysis. Pass budget for strike recommendations.
+
+    Args:
+        ticker: Stock symbol.
+        option_type: 'put' or 'call'. Default: 'put'.
+        dte: Target days-to-expiration (used if expiration is None). Default: 30.
+        expiration: Optional expiration date string (e.g. '2025-01-17'). Overrides dte.
+        strike: Optional specific strike. If None, uses ATM.
+        budget: Optional budget in dollars for strike recommendations.
+        contracts: Number of contracts. Default: 1.
+        risk_free_rate: Risk-free rate for Black-Scholes. Default: 0.05.
+        iv_override: Optional manual IV (e.g. 0.35 for 35%).
+    """
     res = await _analyze_options_setup(
         ticker=ticker, option_type=option_type, dte=dte,
-        budget=budget, contracts=contracts, iv_override=iv_override,
+        expiration=expiration, strike=strike,
+        budget=budget, contracts=contracts,
+        risk_free_rate=risk_free_rate, iv_override=iv_override,
     )
     return res.dict()
 
 
 @mcp.tool()
-async def find_best_to_sell(ticker: str, budget: float | None = None) -> dict[str, Any]:
+async def find_best_to_sell(
+    ticker: str, budget: float | None = None,
+    risk_free_rate: float = 0.05,
+    iv_override: float | None = None,
+) -> dict[str, Any]:
     """Auto-find the best puts and calls to SELL. Scans 7-45 DTE across
     multiple strikes. Scores on RoC, VoPR grade, theta efficiency, delta
     sweet spot. Returns top 3 puts + top 3 calls."""
-    res = await _find_best_to_sell(ticker=ticker, budget=budget)
+    res = await _find_best_to_sell(
+        ticker=ticker, budget=budget,
+        risk_free_rate=risk_free_rate, iv_override=iv_override,
+    )
     return res.dict()
 
 
 @mcp.tool()
-async def find_best_to_buy(ticker: str, budget: float | None = None) -> dict[str, Any]:
+async def find_best_to_buy(
+    ticker: str, budget: float | None = None,
+    option_type: str | None = None,
+    risk_free_rate: float = 0.05,
+    iv_override: float | None = None,
+) -> dict[str, Any]:
     """Auto-find the best directional option to BUY. Reads technicals
     (RSI, EMA stack, MACD) to determine bullish/bearish bias, then scans
-    21-60 DTE for optimal contract. Returns top 3 with direction rationale."""
-    res = await _find_best_to_buy(ticker=ticker, budget=budget)
+    21-60 DTE for optimal contract. Returns top 3 with direction rationale.
+
+    Args:
+        ticker: Stock symbol.
+        budget: Optional budget in dollars.
+        option_type: Force 'call' or 'put'. If None, auto-detect from technicals.
+        risk_free_rate: Risk-free rate for Black-Scholes. Default: 0.05.
+        iv_override: Optional manual IV (e.g. 0.35 for 35%).
+    """
+    res = await _find_best_to_buy(
+        ticker=ticker, budget=budget, option_type=option_type,
+        risk_free_rate=risk_free_rate, iv_override=iv_override,
+    )
     return res.dict()
 
 
@@ -377,10 +435,14 @@ async def generate_alpha_card(ticker: str, sam_take: str = "") -> dict[str, Any]
     """Generate a shareable Alpha Card — a branded HTML analysis card.
     Combines technicals + TradingView consensus into a sleek visual.
     Perfect for sharing trade setups on Discord/Twitter."""
-    technicals = None
-    tv_data = None
+    technicals_dict: dict[str, Any] | None = None
+    tv_data: dict[str, Any] | None = None
     try:
-        technicals = await _analyze_technicals(ticker=ticker)
+        tech_res = await _analyze_technicals(ticker=ticker)
+        if hasattr(tech_res, "data") and isinstance(tech_res.data, dict):
+            technicals_dict = tech_res.data
+        elif isinstance(tech_res, dict):
+            technicals_dict = tech_res
     except Exception:
         pass
     try:
@@ -390,7 +452,7 @@ async def generate_alpha_card(ticker: str, sam_take: str = "") -> dict[str, Any]
 
     html = _generate_alpha_card(
         ticker=ticker,
-        technicals=technicals,
+        technicals=technicals_dict,
         tv_analysis=tv_data,
         sam_take=sam_take,
     )
@@ -402,10 +464,10 @@ async def generate_alpha_card(ticker: str, sam_take: str = "") -> dict[str, Any]
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def search_knowledge(query: str, n_results: int = 5) -> dict[str, Any]:
+async def search_knowledge(query: str, top_k: int = 5) -> dict[str, Any]:
     """Search Sam's library of 139 trading books + methodology guides.
     Returns relevant passages with source citations."""
-    return await _search_knowledge(query=query, n_results=n_results)
+    return await _search_knowledge(query=query, top_k=top_k)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -427,9 +489,17 @@ async def log_conviction(
 
 
 @mcp.tool()
-async def get_track_record() -> dict[str, Any]:
-    """Get the full conviction journal track record with win/loss stats."""
-    return await _get_track_record()
+async def get_track_record(
+    ticker: str | None = None,
+    days: int = 90,
+) -> dict[str, Any]:
+    """Get the full conviction journal track record with win/loss stats.
+
+    Args:
+        ticker: Optional filter by ticker (e.g. 'NVDA').
+        days: How far back to look in days. Default: 90.
+    """
+    return await _get_track_record(ticker=ticker, days=days)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -438,24 +508,57 @@ async def get_track_record() -> dict[str, Any]:
 
 @mcp.tool()
 async def backtest_strategy(
-    ticker: str, strategy: str = "ema_crossover",
-    period: str = "2y", initial_capital: float = 10000,
+    ticker: str, strategy_name: str | None = None,
+    entry_conditions: list[dict[str, Any]] | None = None,
+    exit_conditions: list[dict[str, Any]] | None = None,
+    period: str = "1y", initial_capital: float = 10000,
+    position_size: float = 1.0,
     stop_loss_pct: float | None = None, take_profit_pct: float | None = None,
+    trailing_stop_pct: float | None = None,
+    slippage_bps: int = 10,
 ) -> dict[str, Any]:
     """Backtest a trading strategy on historical data. 6 presets:
     ema_crossover, rsi_bounce, macd_momentum, bollinger_squeeze,
-    golden_cross, ema_stack_breakout. Returns Sharpe, win rate, CAGR, etc."""
+    golden_cross, ema_stack_breakout. Returns Sharpe, win rate, CAGR, etc.
+
+    Either provide strategy_name (preset or saved) OR inline entry_conditions/exit_conditions.
+    """
     return await _backtest_strategy(
-        ticker=ticker, strategy=strategy, period=period,
-        initial_capital=initial_capital,
+        ticker=ticker, strategy_name=strategy_name,
+        entry_conditions=entry_conditions, exit_conditions=exit_conditions,
+        period=period, initial_capital=initial_capital,
+        position_size=position_size,
         stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+        trailing_stop_pct=trailing_stop_pct, slippage_bps=slippage_bps,
     )
 
 
 @mcp.tool()
-async def save_strategy(name: str, conditions: dict[str, Any]) -> dict[str, Any]:
-    """Save a custom strategy to disk for re-use."""
-    return await _save_strategy(name=name, conditions=conditions)
+async def save_strategy(
+    name: str,
+    entry_conditions: list[dict[str, Any]],
+    exit_conditions: list[dict[str, Any]],
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
+    trailing_stop_pct: float | None = None,
+    description: str = "",
+) -> dict[str, Any]:
+    """Save a custom strategy to disk for re-use.
+
+    Args:
+        name: Strategy name (e.g. "my_ema_pullback").
+        entry_conditions: List of entry condition dicts (field/operator/value).
+        exit_conditions: List of exit condition dicts.
+        stop_loss_pct: Optional stop-loss percentage.
+        take_profit_pct: Optional take-profit percentage.
+        trailing_stop_pct: Optional trailing stop percentage.
+        description: Human-readable description.
+    """
+    return await _save_strategy(
+        name=name, entry_conditions=entry_conditions, exit_conditions=exit_conditions,
+        stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+        trailing_stop_pct=trailing_stop_pct, description=description,
+    )
 
 
 @mcp.tool()
@@ -465,28 +568,66 @@ async def list_strategies() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_learned_patterns() -> dict[str, Any]:
-    """Get auto-extracted patterns from past backtests with win rates."""
-    return await _get_learned_patterns()
+async def get_learned_patterns(
+    ticker: str | None = None,
+    setup_keyword: str | None = None,
+    min_trades: int = 3,
+) -> dict[str, Any]:
+    """Get auto-extracted patterns from past backtests with win rates.
+
+    Args:
+        ticker: Optional filter by ticker.
+        setup_keyword: Optional filter by setup name keyword.
+        min_trades: Minimum trades for a pattern to qualify. Default: 3.
+    """
+    return await _get_learned_patterns(
+        ticker=ticker, setup_keyword=setup_keyword, min_trades=min_trades,
+    )
 
 
 @mcp.tool()
 async def sweep_strategy(
-    tickers: list[str], strategy: str = "ema_crossover",
-    period: str = "2y",
+    tickers: list[str],
+    strategy_name: str | None = None,
+    entry_conditions: list[dict[str, Any]] | None = None,
+    exit_conditions: list[dict[str, Any]] | None = None,
+    period: str = "1y",
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
+    sort_by: str = "sharpe_ratio",
 ) -> dict[str, Any]:
-    """Run a strategy across multiple tickers (max 20). Ranks by Sharpe/return."""
-    return await _sweep_strategy(tickers=tickers, strategy=strategy, period=period)
+    """Run a strategy across multiple tickers (max 20). Ranks by Sharpe/return.
+
+    Either provide strategy_name (preset or saved) OR inline entry_conditions/exit_conditions.
+    """
+    return await _sweep_strategy(
+        tickers=tickers, strategy_name=strategy_name,
+        entry_conditions=entry_conditions, exit_conditions=exit_conditions,
+        period=period, stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
+        sort_by=sort_by,
+    )
 
 
 @mcp.tool()
 async def walk_forward_test(
-    ticker: str, strategy: str = "ema_crossover",
-    n_folds: int = 5, period: str = "3y",
+    ticker: str,
+    strategy_name: str | None = None,
+    entry_conditions: list[dict[str, Any]] | None = None,
+    exit_conditions: list[dict[str, Any]] | None = None,
+    total_period: str = "2y",
+    n_folds: int = 4,
+    stop_loss_pct: float | None = None,
+    take_profit_pct: float | None = None,
 ) -> dict[str, Any]:
-    """Walk-forward validation: splits data into n folds, detects overfitting."""
+    """Walk-forward validation: splits data into n folds, detects overfitting.
+
+    Either provide strategy_name (preset or saved) OR inline entry_conditions/exit_conditions.
+    """
     return await _walk_forward_test(
-        ticker=ticker, strategy=strategy, n_folds=n_folds, period=period,
+        ticker=ticker, strategy_name=strategy_name,
+        entry_conditions=entry_conditions, exit_conditions=exit_conditions,
+        total_period=total_period, n_folds=n_folds,
+        stop_loss_pct=stop_loss_pct, take_profit_pct=take_profit_pct,
     )
 
 
@@ -510,33 +651,75 @@ async def get_market_stats() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_put_call_ratios(ticker: str = "SPY") -> dict[str, Any]:
+async def get_put_call_ratios(ticker: str | None = None) -> dict[str, Any]:
     """Put/call ratios for SPY, QQQ, IWM (or any ticker).
-    Below 0.7 = complacent. Above 1.0 = elevated fear (contrarian bullish)."""
+    Below 0.7 = complacent. Above 1.0 = elevated fear (contrarian bullish).
+    Pass a ticker to get ratios for that specific symbol."""
     res = await _get_put_call_ratios(ticker=ticker)
     return res.dict()
 
 
 @mcp.tool()
-async def get_sector_flow() -> dict[str, Any]:
+async def get_sector_flow(window: str = "1d") -> dict[str, Any]:
     """Sector-by-sector options flow with bullish/bearish sentiment.
-    Compare flows: all red = real selling, mixed = rotation."""
-    res = await _get_sector_flow()
+    Compare flows: all red = real selling, mixed = rotation.
+
+    Args:
+        window: Time window — '1h', '4h', '1d' (default), or '1w'.
+    """
+    res = await _get_sector_flow(window=window)
     return res.dict()
 
 
 @mcp.tool()
-async def get_unusual_activity() -> dict[str, Any]:
+async def get_unusual_activity(
+    ticker: str | None = None,
+    sentiment: str = "all",
+    type: str = "all",
+    time_frame: str = "today",
+    min_premium: int = 20000,
+    min_score: int = 70,
+    page_size: int = 25,
+) -> dict[str, Any]:
     """Unusual options flow feed — institutional trades, premium, conviction.
-    High conviction = $500K+ premium, unusual volume vs OI."""
-    res = await _get_unusual_activity()
+    High conviction = $500K+ premium, unusual volume vs OI.
+
+    Args:
+        ticker: Filter by ticker (e.g. 'NVDA'). Default: all.
+        sentiment: 'bullish', 'bearish', or 'all'. Default: 'all'.
+        type: 'call', 'put', or 'all'. Default: 'all'.
+        time_frame: 'hour', 'today', 'yesterday', '3days', 'week', 'month'. Default: 'today'.
+        min_premium: Minimum premium in dollars. Default: 20000.
+        min_score: Minimum unusual score (0-100). Default: 70.
+        page_size: Results per page (max 500). Default: 25.
+    """
+    res = await _get_unusual_activity(
+        ticker=ticker, sentiment=sentiment, type=type,
+        time_frame=time_frame, min_premium=min_premium,
+        min_score=min_score, page_size=page_size,
+    )
     return res.dict()
 
 
 @mcp.tool()
-async def get_signals() -> dict[str, Any]:
-    """Breakout and continuation signals with technical indicator data."""
-    res = await _get_signals()
+async def get_signals(
+    signal_type: str = "all",
+    ticker: str | None = None,
+    timeframe: str = "daily",
+    page_size: int = 25,
+) -> dict[str, Any]:
+    """Breakout and continuation signals with technical indicator data.
+
+    Args:
+        signal_type: 'breakout', 'continuation', or 'all'. Default: 'all'.
+        ticker: Filter by ticker. Default: all.
+        timeframe: 'daily' or 'weekly'. Default: 'daily'.
+        page_size: Results per page. Default: 25.
+    """
+    res = await _get_signals(
+        signal_type=signal_type, ticker=ticker,
+        timeframe=timeframe, page_size=page_size,
+    )
     return res.dict()
 
 
@@ -549,23 +732,48 @@ async def get_gex_overview() -> dict[str, Any]:
 
 
 @mcp.tool()
-async def get_earnings_calendar() -> dict[str, Any]:
-    """Weekly earnings calendar — who reports this week."""
-    res = await _get_earnings_calendar()
+async def get_earnings_calendar(week: str = "current") -> dict[str, Any]:
+    """Weekly earnings calendar — who reports this week.
+
+    Args:
+        week: 'current' or 'next'. Default: 'current'.
+    """
+    res = await _get_earnings_calendar(week=week)
     return res.dict()
 
 
 @mcp.tool()
-async def get_earnings_flow() -> dict[str, Any]:
-    """Pre-earnings options flow — institutional positioning ahead of earnings."""
-    res = await _get_earnings_flow()
+async def get_earnings_flow(days: int = 7) -> dict[str, Any]:
+    """Pre-earnings options flow — institutional positioning ahead of earnings.
+
+    Args:
+        days: Days ahead to look (max 30). Default: 7.
+    """
+    res = await _get_earnings_flow(days=days)
     return res.dict()
 
 
 @mcp.tool()
-async def get_politician_trades() -> dict[str, Any]:
-    """Congressional stock trading disclosures."""
-    res = await _get_politician_trades()
+async def get_politician_trades(
+    ticker: str | None = None,
+    party: str | None = None,
+    trade_type: str | None = None,
+    days: int = 90,
+    limit: int = 25,
+) -> dict[str, Any]:
+    """Congressional stock trading disclosures.
+
+    Args:
+        ticker: Filter by stock ticker. Default: all.
+        party: 'Democrat', 'Republican', or None for all. Default: all.
+        trade_type: 'buy', 'sell', or None for all. Default: all.
+        days: Number of days to look back. Default: 90.
+        limit: Results per page. Default: 25.
+    """
+    res = await _get_politician_trades(
+        ticker=ticker, party=party, trade_type=trade_type,
+        days=days, limit=limit,
+    )
     return res.dict()
 # ═══════════════════════════════════════════════════════════════════════════════
 # ALPHA STREAM (Proactive Signal Detection)
@@ -596,17 +804,38 @@ async def calculate_position_size(
     risk_pct: float = 1.0,
     entry_price: float | None = None,
     stop_price: float | None = None,
+    max_position_pct: float = 10.0,
     method: str = "fixed_fractional",
+    win_rate: float | None = 0.5,
+    avg_win: float | None = 2.0,
+    avg_loss: float | None = 1.0,
 ) -> dict[str, Any]:
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
-    Answers 'how many shares/contracts should I buy?' given account size and risk tolerance."""
+    Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
+
+    Args:
+        ticker: Stock symbol.
+        account_size: Total account value in dollars.
+        risk_pct: % of account to risk per trade. Default: 1.0.
+        entry_price: Optional entry price. If None, fetches live price.
+        stop_price: Optional stop price. If None, uses 2x ATR(14) or 5% fallback.
+        max_position_pct: Max % of account in one position. Default: 10.0.
+        method: 'fixed_fractional', 'atr', or 'kelly'. Default: 'fixed_fractional'.
+        win_rate: For Kelly method. Default: 0.5.
+        avg_win: For Kelly method (avg win/loss ratio). Default: 2.0.
+        avg_loss: For Kelly method. Default: 1.0.
+    """
     res = await _calculate_position_size(
         ticker=ticker,
         account_size=account_size,
         risk_pct=risk_pct,
         entry_price=entry_price,
         stop_price=stop_price,
+        max_position_pct=max_position_pct,
         method=method,
+        win_rate=win_rate,
+        avg_win=avg_win,
+        avg_loss=avg_loss,
     )
     return res.dict()
 
