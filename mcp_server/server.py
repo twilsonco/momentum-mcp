@@ -414,14 +414,15 @@ async def search_knowledge(query: str, n_results: int = 5) -> dict[str, Any]:
 
 @mcp.tool()
 async def log_conviction(
-    ticker: str, direction: str, conviction: str,
-    thesis: str, entry_price: float | None = None,
+    ticker: str, direction: str, confidence: int,
+    reasoning: str, signals: str = "",
 ) -> dict[str, Any]:
-    """Log a trade conviction to the journal. Direction: long/short.
-    Conviction: high/medium/low. Include a thesis for future review."""
+    """Log a directional conviction for a ticker.
+    Direction: bullish/bearish/neutral. Confidence: 1-5 scale (1=speculative, 5=slam dunk).
+    Include reasoning for future review. Optional signals: comma-separated tags (e.g. "RSI_oversold,EMA_bullish")."""
     return await _log_conviction(
-        ticker=ticker, direction=direction, conviction=conviction,
-        thesis=thesis, entry_price=entry_price,
+        ticker=ticker, direction=direction, confidence=confidence,
+        reasoning=reasoning, signals=signals,
     )
 
 
