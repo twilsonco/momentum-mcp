@@ -9,6 +9,7 @@ tradingview-screener>=3.0
 
 # Market data
 yfinance>=0.2
+twelvedata>=1.4
 
 # Data manipulation
 pandas>=2.0

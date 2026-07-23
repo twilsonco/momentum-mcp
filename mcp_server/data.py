@@ -155,6 +155,7 @@ async def get_historical_data(
     sources: list[tuple[str, Any]] = [
         ("yfinance", _fetch_from_yfinance),
         ("mt5_mcp", _fetch_from_mt5),
+        ("twelvedata", _fetch_from_twelvedata),
     ]
 
     errors: list[str] = []
@@ -390,8 +391,61 @@ async def _fetch_from_mt5(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Source 3: TwelveData (REST) — added in Phase 2
+# Source 3: TwelveData (REST)
 # ═══════════════════════════════════════════════════════════════════════════════
+
+async def _fetch_from_twelvedata(
+    ticker: str, period: str, interval: str
+) -> list[dict[str, Any]]:
+    """Fetch OHLCV from TwelveData. Raises ValueError on failure."""
+    td_interval = _INTERVAL_TO_TWELVE.get(interval)
+    if td_interval is None:
+        raise ValueError(f"TwelveData does not support interval '{interval}'")
+
+    outputsize = _period_to_count(period, interval)
+
+    def _fetch() -> pd.DataFrame:
+        try:
+            from twelvedata import TDClient
+            td = TDClient(apikey=TWELVEDATA_API_KEY)
+            df = td.time_series(
+                symbol=ticker,
+                interval=td_interval,
+                outputsize=outputsize,
+                order="ASC",
+            ).as_pandas()
+            if df is None or df.empty:
+                raise ValueError(
+                    f"TwelveData returned no data for '{ticker}' "
+                    f"(period={period}, interval={interval})"
+                )
+            return df
+        except Exception as exc:
+            # Re-raise as ValueError so the fallback chain handles it uniformly
+            raise ValueError(str(exc)) from exc
+
+    try:
+        df = await asyncio.to_thread(_fetch)
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"TwelveData failed for '{ticker}': {exc}") from exc
+
+    records: list[dict[str, Any]] = []
+    for idx, row in df.iterrows():
+        date_str = idx.isoformat() if hasattr(idx, "isoformat") else str(idx)
+        records.append(
+            {
+                "date": date_str,
+                "open": _round(row.get("open")),
+                "high": _round(row.get("high")),
+                "low": _round(row.get("low")),
+                "close": _round(row.get("close")),
+                "volume": _safe_int(row.get("volume", 0)),
+                "source": "twelvedata",
+            }
+        )
+    return records
 
 
 def _round(value: Any, decimals: int = 4) -> float | None:
