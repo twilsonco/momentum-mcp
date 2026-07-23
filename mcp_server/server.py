@@ -301,14 +301,26 @@ async def get_tv_analysis(
 
 @mcp.tool()
 async def generate_chart(
-    ticker: str, period: str = "6mo", interval: str = "1d",
-    style: str = "dark", show_emas: bool = True,
+    ticker: str, period: str = "5d", interval: str = "1h",
+    show_emas: bool = True,
 ) -> dict[str, Any]:
     """Generate a candlestick chart with EMA overlays (8/21/34/55/89).
-    Returns base64-encoded PNG and file path."""
+    Returns base64-encoded PNG and file path.
+
+    Args:
+        ticker: Stock ticker symbol (e.g. AAPL, EURUSD, XAUUSD).
+        period: Lookback period. One of: 1d, 5d, 1mo, 3mo,
+            6mo, 1y, 2y, 5y, 10y, ytd, max.
+            Defaults to 5d.
+        interval: Bar interval. One of: 1m, 2m, 5m, 15m,
+            30m, 60m, 90m, 1h, 1d, 5d, 1wk,
+            1mo, 3mo. Defaults to 1h.
+        show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
+            Defaults to True.
+    """
     return await _generate_chart(
         ticker=ticker, period=period, interval=interval,
-        style=style, show_emas=show_emas,
+        show_emas=show_emas,
     )
 
 
