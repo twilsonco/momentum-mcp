@@ -153,9 +153,9 @@ async def get_historical_data(
 
     # Build the source chain — only include configured sources
     sources: list[tuple[str, Any]] = [
-        ("yfinance", _fetch_from_yfinance),
         ("mt5_mcp", _fetch_from_mt5),
         ("twelvedata", _fetch_from_twelvedata),
+        ("yfinance", _fetch_from_yfinance),
     ]
 
     errors: list[str] = []
