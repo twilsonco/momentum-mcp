@@ -62,7 +62,8 @@ class MetaTraderMCPClient:
             ValueError: If the tool call fails or server is not reachable.
         """
         if not self.session:
-            raise ValueError("Session not initialized. Use context manager: async with MetaTraderMCPClient(...) as client:")
+            raise ValueError("Session not initialized. Use the context manager: 'async with MetaTraderMCPClient(...) as client: result = await client.get_symbol_contract_size(...)'")
+
         
         # Build JSON-RPC request
         payload = {
