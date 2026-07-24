@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from typing import Any, Optional
 
 import aiohttp
@@ -25,15 +26,19 @@ logger = logging.getLogger(__name__)
 METATRADER_MCP_URL = os.getenv("METATRADER_MCP_URL", "").strip()
 METATRADER_MCP_ENABLED = os.getenv("METATRADER_MCP_ENABLED", "true" if METATRADER_MCP_URL else "false").lower() == "true"
 
-# Lock for thread-safe persistent session management (initialized lazily)
+# Lock for thread-safe persistent session management (using threading.Lock for initialization)
 _persistent_session_lock: Optional[asyncio.Lock] = None
+_persistent_session_init_lock = threading.Lock()
 
 
 async def _get_persistent_session_lock() -> asyncio.Lock:
-    """Get or create the persistent session lock (lazy initialization)."""
+    """Get or create the persistent session lock (thread-safe lazy initialization)."""
     global _persistent_session_lock
     if _persistent_session_lock is None:
-        _persistent_session_lock = asyncio.Lock()
+        with _persistent_session_init_lock:
+            # Double-check pattern: check again after acquiring lock
+            if _persistent_session_lock is None:
+                _persistent_session_lock = asyncio.Lock()
     return _persistent_session_lock
 
 
@@ -94,10 +99,18 @@ class MetaTraderMCPClient:
                 await cls._persistent_session.close()
                 cls._persistent_session = None
     
-    async def get_persistent_session(self) -> aiohttp.ClientSession:
-        """Get the persistent session, initializing if necessary."""
-        await self._ensure_persistent_session()
-        return self._persistent_session
+    async def get_persistent_session(self) -> Optional[aiohttp.ClientSession]:
+        """Get the persistent session, initializing if necessary.
+        
+        Returns:
+            The persistent session, or None if initialization fails.
+        """
+        try:
+            await self._ensure_persistent_session()
+            return self._persistent_session
+        except Exception as e:
+            logger.error(f"Failed to get persistent session: {e}")
+            return None
     
     async def _call_tool(self, tool_name: str, **kwargs) -> Any:
         """Call a tool on the MetaTrader MCP server via JSON-RPC.
@@ -116,6 +129,8 @@ class MetaTraderMCPClient:
         if not self.session:
             if self.use_persistent_session:
                 self.session = await self.get_persistent_session()
+                if not self.session:
+                    raise ValueError("Failed to initialize persistent session for MetaTrader MCP")
             else:
                 raise ValueError("Session not initialized. Use async context manager: async with MetaTraderMCPClient(...) as client")
         

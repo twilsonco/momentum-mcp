@@ -160,7 +160,8 @@ async def calculate_position_size(
             if contract_size < MIN_VALID_CONTRACT_SIZE:
                 logger.warning(f"Contract size {contract_size} for {ticker} seems too small, skipping adjustment")
             else:
-                # Use int() to round down to nearest contract multiple (int truncates for positive numbers)
+                # Use int() to round down to nearest contract multiple (int truncates toward zero for positive numbers)
+                # Assumes shares >= 0, which is guaranteed by position sizing logic above
                 # This ensures we stay within risk parameters and never exceed the risk cap
                 num_contracts = int(shares / contract_size)
                 
