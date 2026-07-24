@@ -247,8 +247,11 @@ async def calculate_position_size(
             position_value = shares * entry_price
             constraints_applied = True
         
+        # Recalculate actual risk after constraints are applied
+        actual_risk_amount = shares * risk_per_share
+        
         # Adjust to contract size if available from MetaTrader
-        # Using floor() to strictly respect risk caps: we never increase position size to fit contracts
+        # Support fractional lots (e.g., 0.01 lot for XAUUSD = 1 oz minimum)
         mt5_contract_adjustment = False
         mt5_contract_adjustment_warning = False
         if contract_size and contract_size > 0:
@@ -256,31 +259,31 @@ async def calculate_position_size(
             if contract_size < MIN_VALID_CONTRACT_SIZE:
                 logger.warning(f"Contract size {contract_size} for {ticker} seems too small, skipping adjustment")
             else:
-                # Use floor division (//) to round down to nearest contract multiple
-                # Assumes shares >= 0, which is guaranteed by position sizing logic above
-                # This ensures we stay within risk parameters and never exceed the risk cap
-                num_contracts = shares // contract_size
+                # Calculate fractional lots and round down to minimum lot size (typically 0.01 lot)
+                # For XAUUSD: contract_size=100, so min_lot_size=1 oz
+                fractional_lots = shares / contract_size
+                min_lot_size = 0.01  # Standard minimum for MT5 (1% of a lot)
                 
-                # Calculate adjusted shares based on truncated contract count
-                if num_contracts > 0:
-                    contract_adjusted_shares = num_contracts * contract_size
-                    
-                    # Check if adjustment was needed (use tolerance for floating-point comparison)
-                    if abs(contract_adjusted_shares - shares) > FLOAT_TOLERANCE:
-                        mt5_contract_adjustment = True
-                        # Note: floor() ensures adjustment never increases position size
-                        logger.debug(
-                            f"Adjusted {ticker} position from {shares} to {contract_adjusted_shares} shares "
-                            f"to align with {contract_size} contract size"
-                        )
-                        shares = contract_adjusted_shares
-                        position_value = shares * entry_price
-                else:
-                    # Position size too small to fill even one contract
+                # Round down fractional lots to nearest minimum lot size
+                adjusted_lots = math.floor(fractional_lots / min_lot_size) * min_lot_size
+                contract_adjusted_shares = adjusted_lots * contract_size
+                
+                # Check if adjustment was needed (use tolerance for floating-point comparison)
+                if abs(contract_adjusted_shares - shares) > FLOAT_TOLERANCE:
+                    mt5_contract_adjustment = True
+                    logger.debug(
+                        f"Adjusted {ticker} position from {shares} shares ({fractional_lots:.4f} lots) "
+                        f"to {contract_adjusted_shares} shares ({adjusted_lots:.4f} lots) "
+                        f"to align with {min_lot_size} minimum lot size"
+                    )
+                    shares = contract_adjusted_shares
+                    position_value = shares * entry_price
+                
+                # No warning needed since fractional lots are always tradeable
+                if contract_adjusted_shares == 0:
                     mt5_contract_adjustment_warning = True
                     logger.warning(
-                        f"Position size for {ticker} ({shares} shares) is smaller than contract size "
-                        f"({contract_size}), cannot adjust to contract size"
+                        f"Position size for {ticker} ({shares} shares) rounds to 0 lots, position too small"
                     )
 
         # Summary
@@ -288,11 +291,13 @@ async def calculate_position_size(
             f"Position size for {ticker} @ ${entry_price:.2f}:\n"
             f"- Recommended: {shares} shares (~${position_value:,.2f})\n"
             f"- Method: {method.replace('_', ' ').title()}\n"
-            f"- Risk Amount: ${risk_amount:,.2f} ({risk_pct}% of account)\n"
+            f"- Actual Risk: ${actual_risk_amount:,.2f} ({actual_risk_amount/account_size*100:.2f}% of account)\n"
             f"- Stop Loss: ${stop_price:.2f} ({abs(entry_price-stop_price)/entry_price*100:.1f}% risk per share)"
         )
         if constraints_applied:
             summary += f"\n- ⚠️ Capped by {max_position_pct}% max position constraint."
+            if actual_risk_amount < risk_amount:
+                summary += f"\n  (Requested {risk_pct}% risk = ${risk_amount:,.2f}, got {actual_risk_amount/account_size*100:.2f}% = ${actual_risk_amount:,.2f})"
         if mt5_contract_adjustment:
             summary += f"\n- ✓ Adjusted to {contract_size} contract size (MetaTrader)."
         if mt5_contract_adjustment_warning:
@@ -307,6 +312,8 @@ async def calculate_position_size(
             "account_size": account_size,
             "risk_pct": risk_pct,
             "risk_amount": round(risk_amount, 2),
+            "actual_risk_amount": round(actual_risk_amount, 2),
+            "actual_risk_pct": round(actual_risk_amount / account_size * 100, 2),
             "recommended_shares": shares,
             "recommended_contracts": shares // 100,
             "position_value": round(position_value, 2),
