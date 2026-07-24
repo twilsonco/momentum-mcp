@@ -147,15 +147,20 @@ async def calculate_position_size(
         
         # Fetch account size from MT5 if not provided
         if account_size is None:
-            try:
-                account_info = await _get_mt5_account_info()
-                if account_info and "balance" in account_info:
-                    account_size = account_info["balance"]
-                    logger.info(f"Fetched account balance from MT5: ${account_size:,.2f}")
-                else:
-                    return SignalResult.error_msg("Could not fetch account balance from MetaTrader MCP server and no account_size provided")
-            except Exception as e:
-                return SignalResult.error_msg(f"Failed to fetch account size from MT5: {e}")
+            if MT5_MCP_URL:
+                try:
+                    account_info = await _get_mt5_account_info()
+                    if account_info and "balance" in account_info:
+                        account_size = account_info["balance"]
+                        logger.info(f"Fetched account balance from MT5: ${account_size:,.2f}")
+                    else:
+                        logger.warning("Could not fetch account balance from MetaTrader MCP server; account_size parameter is required")
+                        return SignalResult.error_msg("account_size is required. Either provide it as a parameter or ensure MetaTrader MCP server is running and configured correctly.")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch account size from MT5 ({e}); account_size parameter is required")
+                    return SignalResult.error_msg(f"account_size is required. MT5 fetch failed: {e}")
+            else:
+                return SignalResult.error_msg("account_size parameter is required when MT5_MCP_URL is not configured")
         
         # Fetch MetaTrader contract size if MT5 is configured
         contract_size = None
