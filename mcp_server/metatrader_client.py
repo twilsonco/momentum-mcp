@@ -83,12 +83,20 @@ class MetaTraderMCPClient:
             self._owns_session = False
     
     async def _ensure_persistent_session(self):
-        """Ensure the persistent session exists (thread-safe)."""
+        """Ensure the persistent session exists (thread-safe).
+        
+        Raises:
+            Exception: If session creation fails.
+        """
         lock = await _get_persistent_session_lock()
         async with lock:
             # Double-check pattern: check again after acquiring lock
             if self._persistent_session is None or self._persistent_session.closed:
-                self._persistent_session = aiohttp.ClientSession()
+                try:
+                    self._persistent_session = aiohttp.ClientSession()
+                except Exception as e:
+                    logger.error(f"Failed to create persistent session: {e}")
+                    raise
     
     @classmethod
     async def close_persistent_session(cls):
@@ -96,18 +104,26 @@ class MetaTraderMCPClient:
         lock = await _get_persistent_session_lock()
         async with lock:
             if cls._persistent_session and not cls._persistent_session.closed:
-                await cls._persistent_session.close()
-                cls._persistent_session = None
+                try:
+                    await cls._persistent_session.close()
+                except Exception as e:
+                    logger.error(f"Error closing persistent session: {e}")
+                finally:
+                    cls._persistent_session = None
     
     async def get_persistent_session(self) -> Optional[aiohttp.ClientSession]:
         """Get the persistent session, initializing if necessary.
         
         Returns:
-            The persistent session, or None if initialization fails.
+            The persistent session if available and initialized, None if initialization fails.
         """
         try:
             await self._ensure_persistent_session()
-            return self._persistent_session
+            if self._persistent_session and not self._persistent_session.closed:
+                return self._persistent_session
+            else:
+                logger.error("Persistent session is None or closed after initialization attempt")
+                return None
         except Exception as e:
             logger.error(f"Failed to get persistent session: {e}")
             return None
