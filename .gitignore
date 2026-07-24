@@ -33,3 +33,5 @@ build/
 .env.*.local
 # But keep .env.example tracked
 !.env.example
+
+data
