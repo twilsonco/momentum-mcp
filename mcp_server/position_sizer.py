@@ -157,12 +157,12 @@ async def calculate_position_size(
                 # Round shares to nearest contract multiple (for Forex/CFD trading)
                 # For both integer contract sizes (e.g., 100) and fractional ones (e.g., 0.001)
                 num_contracts = max(1, round(shares / contract_size))  # Minimum 1 contract
-                # Use round() instead of int() to avoid truncation of fractional contract sizes
+                # Round to integer to avoid floating-point precision issues
                 contract_adjusted_shares = int(round(num_contracts * contract_size))
                 # Ensure at least 1 share
                 contract_adjusted_shares = max(1, contract_adjusted_shares)
                 
-                # Check if adjustment was needed (use tolerance for floating-point comparison)
+                # Check if adjustment was needed (tolerance for floating-point comparison)
                 if abs(contract_adjusted_shares - shares) > 0.5:
                     mt5_contract_adjustment = True
                     shares = contract_adjusted_shares
