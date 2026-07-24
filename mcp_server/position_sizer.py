@@ -18,6 +18,10 @@ from mcp_server.metatrader_client import get_symbol_contract_size_from_mt5
 
 logger = logging.getLogger(__name__)
 
+# Constants for contract size adjustment
+MIN_VALID_CONTRACT_SIZE = 0.001  # Minimum valid contract size threshold
+FLOAT_TOLERANCE = 0.01          # Tolerance for floating-point comparison
+
 async def calculate_position_size(
     ticker: str,
     account_size: float,
@@ -153,7 +157,7 @@ async def calculate_position_size(
         mt5_contract_adjustment_warning = False
         if contract_size and contract_size > 0:
             # Validate contract_size is reasonable (not too small)
-            if contract_size < 0.001:
+            if contract_size < MIN_VALID_CONTRACT_SIZE:
                 logger.warning(f"Contract size {contract_size} for {ticker} seems too small, skipping adjustment")
             else:
                 # Use floor() to round down to nearest contract multiple, never exceeding risk cap
@@ -165,7 +169,7 @@ async def calculate_position_size(
                     contract_adjusted_shares = num_contracts * contract_size
                     
                     # Check if adjustment was needed (use tolerance for floating-point comparison)
-                    if abs(contract_adjusted_shares - shares) > 0.01:
+                    if abs(contract_adjusted_shares - shares) > FLOAT_TOLERANCE:
                         mt5_contract_adjustment = True
                         # Note: floor() ensures adjustment never increases position size
                         logger.debug(
