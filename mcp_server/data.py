@@ -110,15 +110,19 @@ async def get_historical_data(
     period: str = "3mo",
     interval: str = "1d",
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV historical data for a ticker symbol.
+    """Fetch OHLCV historical data for any symbol.
 
     Tries multiple data sources in order until one succeeds:
-      1. yfinance (default)
-      2. MetaTrader MCP (if ``MT5_MCP_URL`` is set)
-      3. TwelveData (if ``TWELVEDATA_API_KEY`` is set)
+      1. MetaTrader MCP (if ``MT5_MCP_URL`` is configured) — supports any MT5 symbol
+      2. TwelveData (if ``TWELVEDATA_API_KEY`` is configured) — stocks, forex, crypto
+      3. yfinance (default) — primarily stocks and crypto
+
+    Works with stocks, forex, metals, indices, crypto, or any MT5-tradeable symbol.
 
     Args:
-        ticker: Stock ticker symbol (e.g. ``"AAPL"``, ``"MSFT"``).
+        ticker: Symbol name (e.g., ``"AAPL"``, ``"MSFT"``, ``"XAUUSD"``, ``"EURUSD"``).
+            For MT5 MCP, use native MT5 symbol names. For yfinance/TwelveData, use appropriate
+            ticker/crypto pair formats (e.g., EUR-USD, EURUSD, GC=F for gold).
         period: Lookback period. One of: ``1d``, ``5d``, ``1mo``, ``3mo``,
             ``6mo``, ``1y``, ``2y``, ``5y``, ``10y``, ``ytd``, ``max``.
             Defaults to ``"3mo"``.

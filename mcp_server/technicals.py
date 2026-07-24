@@ -27,9 +27,10 @@ async def analyze_technicals(
     period: str = "1y",
     interval: str = "1d",
 ) -> SignalResult:
-    """Compute a full technical indicator suite for a ticker.
+    """Compute a full technical indicator suite for any symbol.
 
-    Fetches OHLCV data and applies:
+    Fetches OHLCV data from configured sources (MT5 MCP → TwelveData → yfinance)
+    and applies:
     - **RSI(14)** — Relative Strength Index
     - **MACD(12, 26, 9)** — Moving Average Convergence Divergence
     - **EMA Stack (8/21/34/55/89)** — Michael's signature momentum stack
@@ -41,8 +42,13 @@ async def analyze_technicals(
     - **Bollinger Bands (20,2)** — Upper/Middle/Lower
     - **CCI(20)** — Commodity Channel Index
 
+    Works for stocks, forex, metals, indices, crypto, or any MT5-tradeable symbol.
+    
+    Note: With MT5 MCP configured, use native MT5 symbol names (e.g., XAUUSD, EURUSD).
+    Without MT5 MCP, falls back to TwelveData/yfinance which have limited non-stock support.
+
     Args:
-        ticker: Stock ticker symbol (e.g. ``"AAPL"``).
+        ticker: Symbol name (e.g., ``"AAPL"``, ``"XAUUSD"``, ``"EURUSD"``, ``"SPX"``).
         period: Lookback period. One of: ``1d``, ``5d``, ``1mo``, ``3mo``,
             ``6mo``, ``1y``, ``2y``, ``5y``, ``10y``, ``ytd``, ``max``.
             Defaults to ``"1y"``.

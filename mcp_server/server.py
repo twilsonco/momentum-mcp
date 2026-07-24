@@ -255,9 +255,13 @@ async def analyze_technicals(
     period: str = "1y",
     interval: str = "1d",
 ) -> dict[str, Any]:
-    """Compute 24 technical indicators: EMA 8/21/34/55/89, SMA 50/100/200,
-    RSI(14), MACD(12,26,9), ADX(14), ATR(14), Williams %R, Stochastic,
-    Bollinger Bands, CCI(20). Returns latest readings + analysis summary.
+    """Compute 24 technical indicators for any symbol (stocks, forex, metals, indices, etc.).
+    
+    Works with any MT5-tradeable symbol when MT5 MCP is configured. Falls back to TwelveData/yfinance
+    for non-MT5 symbols (though coverage is limited for forex, metals, etc.).
+    
+    Returns: EMA 8/21/34/55/89, SMA 50/100/200, RSI(14), MACD(12,26,9), ADX(14), ATR(14),
+    Williams %R, Stochastic, Bollinger Bands, CCI(20). Latest readings + analysis summary.
     """
     res = await _analyze_technicals(ticker=ticker, period=period, interval=interval)
     return res.dict()
