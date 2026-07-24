@@ -105,7 +105,11 @@ mcp = FastMCP(
         "Data sources: yfinance, TradingView, TraderDaddy Pro REST API, ChromaDB.\n"
         "Rate limited to 30 requests/minute per IP. Results are cached with "
         "market-hours-aware TTL (shorter during market open for freshness).\n\n"
-        "Learn more at https://traderdaddy.pro"
+        "Learn more at https://traderdaddy.pro\n\n"
+        "Common Args for all tools that accept ``ticker``, ``period``, and ``interval``:\n"
+        "  - ticker: Stock ticker symbol (e.g. AAPL, EURUSD, XAUUSD).\n"
+        "  - period: Lookback period. One of: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max.\n"
+        "  - interval: Bar interval. One of: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo."
     ),
 )
 
@@ -236,11 +240,6 @@ async def get_historical_data(
     interval: str = "1d",
 ) -> list[dict[str, Any]]:
     """Fetch OHLCV historical price data for a stock.
-
-    Args:
-        ticker: Stock symbol (e.g. "AAPL").
-        period: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max.
-        interval: 1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo.
     """
     return await _get_historical_data(ticker=ticker, period=period, interval=interval)
 
@@ -250,11 +249,16 @@ async def get_historical_data(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def analyze_technicals(ticker: str, period: str = "1y") -> dict[str, Any]:
+async def analyze_technicals(
+    ticker: str,
+    period: str = "1y",
+    interval: str = "1d",
+) -> dict[str, Any]:
     """Compute 24 technical indicators: EMA 8/21/34/55/89, SMA 50/100/200,
     RSI(14), MACD(12,26,9), ADX(14), ATR(14), Williams %R, Stochastic,
-    Bollinger Bands, CCI(20). Returns latest readings + analysis summary."""
-    res = await _analyze_technicals(ticker=ticker, period=period)
+    Bollinger Bands, CCI(20). Returns latest readings + analysis summary.
+    """
+    res = await _analyze_technicals(ticker=ticker, period=period, interval=interval)
     return res.dict()
 
 
@@ -283,8 +287,6 @@ async def get_tv_analysis(
     | Futures (TradingView)  | GC1!, ES1!, CL1!               | cfd      |
 
     Args:
-        ticker: Symbol as shown above.
-        interval: 1m, 5m, 15m, 1h, 4h, 1d (default), 1w, 1M.
         exchange: Exchange within the screener. Defaults to NASDAQ.
             Ignored when ``screener`` is set explicitly.
         screener: ``"america"``, ``"cfd"``, or ``"crypto"``. ``None``
@@ -308,13 +310,6 @@ async def generate_chart(
     Returns base64-encoded PNG and file path.
 
     Args:
-        ticker: Stock ticker symbol (e.g. AAPL, EURUSD, XAUUSD).
-        period: Lookback period. One of: 1d, 5d, 1mo, 3mo,
-            6mo, 1y, 2y, 5y, 10y, ytd, max.
-            Defaults to 5d.
-        interval: Bar interval. One of: 1m, 2m, 5m, 15m,
-            30m, 60m, 90m, 1h, 1d, 5d, 1wk,
-            1mo, 3mo. Defaults to 1h.
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to True.
     """
@@ -341,7 +336,6 @@ async def analyze_options_setup(
     DTE/strike analysis. Pass budget for strike recommendations.
 
     Args:
-        ticker: Stock symbol.
         option_type: 'put' or 'call'. Default: 'put'.
         dte: Target days-to-expiration (used if expiration is None). Default: 30.
         expiration: Optional expiration date string (e.g. '2025-01-17'). Overrides dte.
@@ -388,7 +382,6 @@ async def find_best_to_buy(
     21-60 DTE for optimal contract. Returns top 3 with direction rationale.
 
     Args:
-        ticker: Stock symbol.
         budget: Optional budget in dollars.
         option_type: Force 'call' or 'put'. If None, auto-detect from technicals.
         risk_free_rate: Risk-free rate for Black-Scholes. Default: 0.05.
@@ -508,7 +501,6 @@ async def get_track_record(
     """Get the full conviction journal track record with win/loss stats.
 
     Args:
-        ticker: Optional filter by ticker (e.g. 'NVDA').
         days: How far back to look in days. Default: 90.
     """
     return await _get_track_record(ticker=ticker, days=days)
@@ -588,7 +580,6 @@ async def get_learned_patterns(
     """Get auto-extracted patterns from past backtests with win rates.
 
     Args:
-        ticker: Optional filter by ticker.
         setup_keyword: Optional filter by setup name keyword.
         min_trades: Minimum trades for a pattern to qualify. Default: 3.
     """
@@ -697,7 +688,6 @@ async def get_unusual_activity(
     High conviction = $500K+ premium, unusual volume vs OI.
 
     Args:
-        ticker: Filter by ticker (e.g. 'NVDA'). Default: all.
         sentiment: 'bullish', 'bearish', or 'all'. Default: 'all'.
         type: 'call', 'put', or 'all'. Default: 'all'.
         time_frame: 'hour', 'today', 'yesterday', '3days', 'week', 'month'. Default: 'today'.
@@ -826,7 +816,6 @@ async def calculate_position_size(
     Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
 
     Args:
-        ticker: Stock symbol.
         account_size: Total account value in dollars.
         risk_pct: % of account to risk per trade. Default: 1.0.
         entry_price: Optional entry price. If None, fetches live price.

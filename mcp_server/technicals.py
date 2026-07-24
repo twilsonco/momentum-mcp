@@ -25,10 +25,11 @@ from mcp_server.schema import SignalResult
 async def analyze_technicals(
     ticker: str,
     period: str = "1y",
+    interval: str = "1d",
 ) -> SignalResult:
     """Compute a full technical indicator suite for a ticker.
 
-    Fetches daily OHLCV data and applies:
+    Fetches OHLCV data and applies:
     - **RSI(14)** — Relative Strength Index
     - **MACD(12, 26, 9)** — Moving Average Convergence Divergence
     - **EMA Stack (8/21/34/55/89)** — Michael's signature momentum stack
@@ -42,7 +43,12 @@ async def analyze_technicals(
 
     Args:
         ticker: Stock ticker symbol (e.g. ``"AAPL"``).
-        period: Lookback period. Defaults to ``"6mo"``.
+        period: Lookback period. One of: ``1d``, ``5d``, ``1mo``, ``3mo``,
+            ``6mo``, ``1y``, ``2y``, ``5y``, ``10y``, ``ytd``, ``max``.
+            Defaults to ``"1y"``.
+        interval: Bar interval. One of: ``1m``, ``2m``, ``5m``, ``15m``,
+            ``30m``, ``60m``, ``90m``, ``1h``, ``1d`` (default), ``5d``,
+            ``1wk``, ``1mo``, ``3mo``. Defaults to ``"1d"``.
 
     Returns:
         A SignalResult with all indicator values + a plain-English summary.
@@ -51,7 +57,7 @@ async def analyze_technicals(
 
     try:
         # Fetch OHLCV data (already validated inside data module)
-        records = await get_historical_data(ticker, period=period, interval="1d")
+        records = await get_historical_data(ticker, period=period, interval=interval)
 
         if len(records) < 35:
             return SignalResult.error_msg(
