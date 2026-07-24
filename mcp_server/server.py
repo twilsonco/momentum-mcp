@@ -556,9 +556,23 @@ async def calculate_position_size(
     entry_price: float | None = None,
     stop_price: float | None = None,
     method: str = "fixed_fractional",
+    mt5_symbol: str | None = None,
 ) -> dict[str, Any]:
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
-    Answers 'how many shares/contracts should I buy?' given account size and risk tolerance."""
+    Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
+    
+    Optionally integrates with MetaTrader MCP server (if configured) to fetch contract sizes
+    and symbol info for accurate Forex/CFD position sizing.
+    
+    Args:
+        ticker: Stock ticker or symbol (e.g., "AAPL", "EURUSD").
+        account_size: Total account size.
+        risk_pct: Percentage of account to risk (default 1%).
+        entry_price: Entry price (fetched live if not provided).
+        stop_price: Stop loss price (calculated from ATR if not provided).
+        method: "fixed_fractional" (default), "atr", or "kelly".
+        mt5_symbol: MetaTrader symbol name (enables MT5 integration for contract size).
+    """
     res = await _calculate_position_size(
         ticker=ticker,
         account_size=account_size,
@@ -566,6 +580,7 @@ async def calculate_position_size(
         entry_price=entry_price,
         stop_price=stop_price,
         method=method,
+        mt5_symbol=mt5_symbol,
     )
     return res.dict()
 
