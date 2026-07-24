@@ -1,178 +1,78 @@
 """
 Position sizing module — Fixed Fractional, ATR-based, and Kelly Criterion.
 
-Answers: "How many shares/contracts should I buy?"
-Integrates with MetaTrader MCP server (if configured via MT5_MCP_URL) to fetch
-contract sizes and symbol information for more accurate Forex/CFD position sizing.
+Answers: "How many shares should I buy?"
+Stock-focused position sizing with multiple methods for equities and options.
+
+For Forex/Metals/Futures/Indices, see mt5_position_sizer.py which uses MetaTrader MCP.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-import os
 from typing import Any
 
-from dotenv import load_dotenv
-
 from mcp_server.schema import SignalResult
-from mcp_server.data import get_live_price, MT5_MCP_URL, _get_mt5_client
+from mcp_server.data import get_live_price
 from mcp_server.technicals import analyze_technicals
-
-load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Constants for contract size adjustment
-MIN_VALID_CONTRACT_SIZE = 0.001  # Minimum valid contract size threshold
-FLOAT_TOLERANCE = 0.01          # Tolerance for floating-point comparison
-
-
-async def _get_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
-    """Fetch symbol contract size from MetaTrader MCP server.
-    
-    Args:
-        symbol: MetaTrader symbol (e.g., "XAUUSD").
-        
-    Returns:
-        Dict with 'contract_size' key, or None if unavailable.
-    """
-    if not MT5_MCP_URL:
-        return None
-    
-    try:
-        import json
-        client = _get_mt5_client()
-        result = await client.call_tool(
-            "get_symbol_contract_size",
-            {"symbol_name": symbol},
-        )
-        
-        # Extract contract size from response
-        for content in result.content:
-            if hasattr(content, "text"):
-                text = content.text.strip()
-                # Response is either a JSON number or plain number
-                try:
-                    contract_size = float(text)
-                    return {"contract_size": contract_size}
-                except (ValueError, TypeError):
-                    logger.warning(f"Could not parse contract size from MT5 response for {symbol}: {text}")
-        return None
-    except Exception as e:
-        logger.warning(f"Could not fetch contract size from MT5 for {symbol}: {e}")
-        return None
-
-
-async def _get_mt5_account_info() -> dict[str, Any] | None:
-    """Fetch account balance and info from MetaTrader MCP server.
-    
-    Returns:
-        Dict with 'balance' and other account fields, or None if unavailable.
-    """
-    if not MT5_MCP_URL:
-        return None
-    
-    try:
-        import json
-        client = _get_mt5_client()
-        result = await client.call_tool("get_account_info", {})
-        
-        # Extract account info from response — returns JSON
-        for content in result.content:
-            if hasattr(content, "text"):
-                text = content.text.strip()
-                try:
-                    account_info = json.loads(text)
-                    if isinstance(account_info, dict) and "balance" in account_info:
-                        return account_info
-                except (json.JSONDecodeError, AttributeError):
-                    logger.warning(f"Could not parse account info from MT5 response: {text}")
-        return None
-    except Exception as e:
-        logger.warning(f"Could not fetch account info from MT5: {e}")
-        return None
 
 async def calculate_position_size(
     ticker: str,
-    account_size: float | None = None,
-    risk_pct: float = 1.0,          # % of account to risk per trade
+    account_size: float,
+    risk_pct: float = 1.0,
     entry_price: float | None = None,
     stop_price: float | None = None,
-    max_position_pct: float = 10.0, # max % of account in one position
-    max_sector_pct: float = 25.0,   # max % of account in one sector (placeholder)
-    method: str = "fixed_fractional", # or "atr" or "kelly"
-    win_rate: float | None = 0.5,  # for Kelly default
-    avg_win: float | None = 2.0,   # for Kelly default
-    avg_loss: float | None = 1.0,  # for Kelly default
+    max_position_pct: float = 10.0,
+    method: str = "fixed_fractional",
+    win_rate: float | None = 0.5,
+    avg_win: float | None = 2.0,
+    avg_loss: float | None = 1.0,
 ) -> SignalResult:
-    """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
-    Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
+    """Calculate risk-based position size for stock trading.
     
-    If MetaTrader MCP server is configured and account_size is None, fetches account balance.
-    Also fetches contract size and symbol info for more accurate Forex/CFD position sizing.
+    Answers: "How many shares should I buy?" given account size and risk tolerance.
+    
+    Supports three position sizing methods:
+    1. Fixed Fractional: Risk a fixed % of account per trade
+    2. ATR-based: Scale position based on volatility (ATR)
+    3. Kelly Criterion: Optimal bet size based on win rate and profit ratio
     
     Args:
-        ticker: Stock ticker or symbol name (e.g., "AAPL", "XAUUSD").
-        account_size: Total account size in account currency. If None, fetches from MT5.
+        ticker: Stock ticker symbol (e.g., "AAPL", "MSFT").
+        account_size: Total account size in dollars (required).
         risk_pct: Percentage of account to risk per trade (default 1%).
-        entry_price: Entry price (fetched live if None, with 5s timeout).
-        stop_price: Stop loss price (calculated from ATR if None, with 10s timeout).
+        entry_price: Entry price. If None, fetches live price (5s timeout).
+        stop_price: Stop loss price. If None, calculated from ATR (10s timeout, fallback 5%).
         max_position_pct: Maximum position size as % of account (default 10%).
-        max_sector_pct: Maximum sector exposure (placeholder, default 25%).
-        method: Position sizing method - "fixed_fractional", "atr", or "kelly" (default fixed_fractional).
-        win_rate: Win rate for Kelly criterion (default 0.5).
-        avg_win: Average win size for Kelly (default 2.0).
-        avg_loss: Average loss size for Kelly (default 1.0).
+        method: Position sizing method - "fixed_fractional" (default), "atr", or "kelly".
+        win_rate: Win rate for Kelly method (default 0.5, i.e., 50%).
+        avg_win: Average win size for Kelly (default 2.0, i.e., 2x loss).
+        avg_loss: Average loss size for Kelly (default 1.0, i.e., base unit).
         
     Returns:
-        SignalResult with position size recommendation and detailed metrics.
+        SignalResult with position size in shares, detailed metrics, and method comparison.
     """
     try:
         ticker = ticker.strip().upper()
-        
-        # Fetch account size from MT5 if not provided
-        if account_size is None:
-            if MT5_MCP_URL:
-                try:
-                    account_info = await _get_mt5_account_info()
-                    if account_info and "balance" in account_info:
-                        account_size = account_info["balance"]
-                        logger.info(f"Fetched account balance from MT5: ${account_size:,.2f}")
-                    else:
-                        logger.warning("Could not fetch account balance from MetaTrader MCP server; account_size parameter is required")
-                        return SignalResult.error_msg("account_size is required. Either provide it as a parameter or ensure MetaTrader MCP server is running and configured correctly.")
-                except Exception as e:
-                    logger.warning(f"Failed to fetch account size from MT5 ({e}); account_size parameter is required")
-                    return SignalResult.error_msg(f"account_size is required. MT5 fetch failed: {e}")
-            else:
-                return SignalResult.error_msg("account_size parameter is required when MT5_MCP_URL is not configured")
-        
-        # Fetch MetaTrader contract size if MT5 is configured
-        contract_size = None
-        if MT5_MCP_URL:
-            try:
-                symbol_info = await _get_mt5_symbol_info(ticker)
-                if symbol_info and "contract_size" in symbol_info:
-                    contract_size = symbol_info["contract_size"]
-            except Exception as e:
-                logger.warning(f"Could not fetch contract size from MT5 for {ticker}: {e}")
-        
+
         # 1. Fetch live price if entry_price is None
         if entry_price is None:
             try:
-                # Use asyncio.wait_for to timeout after 5 seconds
                 entry_price = await asyncio.wait_for(get_live_price(ticker), timeout=5.0)
             except asyncio.TimeoutError:
                 return SignalResult.error_msg(f"Timeout fetching live price for {ticker} (exceeded 5s)")
             except Exception as e:
                 return SignalResult.error_msg(f"Could not fetch live price for {ticker}: {e}")
-        
-        # 2. Get ATR(14) if needed (for stop_price or atr method), but with timeout and graceful fallback
+
+        # 2. Get ATR(14) if needed (for stop_price or atr method), with timeout
         atr_14 = None
         if stop_price is None or method == "atr":
             try:
-                # Use asyncio.wait_for to timeout after 10 seconds
                 tech_res = await asyncio.wait_for(analyze_technicals(ticker), timeout=10.0)
                 if tech_res.status == "success":
                     atr_14 = tech_res.data.get("atr_14")
@@ -180,7 +80,7 @@ async def calculate_position_size(
                 logger.warning(f"Timeout fetching technicals for {ticker}, using fallback stop")
             except Exception as e:
                 logger.warning(f"Could not fetch technicals for {ticker}: {e}, using fallback stop")
-            
+
         if stop_price is None:
             if atr_14:
                 stop_price = entry_price - (atr_14 * 2)
@@ -194,12 +94,12 @@ async def calculate_position_size(
             return SignalResult.error_msg(f"Invalid setup for {ticker}: Entry ({entry_price}) <= Stop ({stop_price})")
 
         risk_amount = account_size * (risk_pct / 100)
-        
-        # 3. Compute methods
+
+        # 3. Compute position sizing methods
         # Fixed Fractional
         ff_shares = int(risk_amount / risk_per_share)
         ff_value = ff_shares * entry_price
-        
+
         # ATR-based
         if atr_14:
             atr_shares = int(risk_amount / (atr_14 * 2))
@@ -207,13 +107,12 @@ async def calculate_position_size(
         else:
             atr_shares = ff_shares
             atr_value = ff_value
-            
+
         # Kelly
         kelly_fraction = None
         kelly_shares = 0
         kelly_value = 0
         if win_rate is not None and avg_win is not None and avg_loss is not None:
-            # Kelly % = (bp - q) / b  where b = odds (avg_win/avg_loss), p = win_rate, q = loss_rate
             b = avg_win / avg_loss if avg_loss != 0 else 1.0
             p = win_rate
             q = 1 - p
@@ -223,8 +122,6 @@ async def calculate_position_size(
                 kelly_shares = int(kelly_value / entry_price)
             else:
                 kelly_fraction = 0
-                kelly_value = 0
-                kelly_shares = 0
 
         # Select primary method
         if method == "atr":
@@ -237,54 +134,18 @@ async def calculate_position_size(
             shares = ff_shares
             position_value = ff_value
 
-        # 6. Apply constraints
+        # 4. Apply position size constraint
         max_position_value = account_size * (max_position_pct / 100)
         max_shares = int(max_position_value / entry_price)
-        
+
         constraints_applied = False
         if shares > max_shares:
             shares = max_shares
             position_value = shares * entry_price
             constraints_applied = True
-        
-        # Recalculate actual risk after constraints are applied
+
+        # Recalculate actual risk after constraints
         actual_risk_amount = shares * risk_per_share
-        
-        # Adjust to contract size if available from MetaTrader
-        # Support fractional lots (e.g., 0.01 lot for XAUUSD = 1 oz minimum)
-        mt5_contract_adjustment = False
-        mt5_contract_adjustment_warning = False
-        if contract_size and contract_size > 0:
-            # Validate contract_size is reasonable (not too small)
-            if contract_size < MIN_VALID_CONTRACT_SIZE:
-                logger.warning(f"Contract size {contract_size} for {ticker} seems too small, skipping adjustment")
-            else:
-                # Calculate fractional lots and round down to minimum lot size (typically 0.01 lot)
-                # For XAUUSD: contract_size=100, so min_lot_size=1 oz
-                fractional_lots = shares / contract_size
-                min_lot_size = 0.01  # Standard minimum for MT5 (1% of a lot)
-                
-                # Round down fractional lots to nearest minimum lot size
-                adjusted_lots = math.floor(fractional_lots / min_lot_size) * min_lot_size
-                contract_adjusted_shares = adjusted_lots * contract_size
-                
-                # Check if adjustment was needed (use tolerance for floating-point comparison)
-                if abs(contract_adjusted_shares - shares) > FLOAT_TOLERANCE:
-                    mt5_contract_adjustment = True
-                    logger.debug(
-                        f"Adjusted {ticker} position from {shares} shares ({fractional_lots:.4f} lots) "
-                        f"to {contract_adjusted_shares} shares ({adjusted_lots:.4f} lots) "
-                        f"to align with {min_lot_size} minimum lot size"
-                    )
-                    shares = contract_adjusted_shares
-                    position_value = shares * entry_price
-                
-                # No warning needed since fractional lots are always tradeable
-                if contract_adjusted_shares == 0:
-                    mt5_contract_adjustment_warning = True
-                    logger.warning(
-                        f"Position size for {ticker} ({shares} shares) rounds to 0 lots, position too small"
-                    )
 
         # Summary
         summary = (
@@ -298,10 +159,6 @@ async def calculate_position_size(
             summary += f"\n- ⚠️ Capped by {max_position_pct}% max position constraint."
             if actual_risk_amount < risk_amount:
                 summary += f"\n  (Requested {risk_pct}% risk = ${risk_amount:,.2f}, got {actual_risk_amount/account_size*100:.2f}% = ${actual_risk_amount:,.2f})"
-        if mt5_contract_adjustment:
-            summary += f"\n- ✓ Adjusted to {contract_size} contract size (MetaTrader)."
-        if mt5_contract_adjustment_warning:
-            summary += f"\n- ⚠️ Position size is smaller than contract size ({contract_size}), cannot adjust to contract size."
 
         data = {
             "ticker": ticker,
@@ -315,17 +172,11 @@ async def calculate_position_size(
             "actual_risk_amount": round(actual_risk_amount, 2),
             "actual_risk_pct": round(actual_risk_amount / account_size * 100, 2),
             "recommended_shares": shares,
-            "recommended_contracts": shares // 100,
             "position_value": round(position_value, 2),
             "position_pct_of_account": round((position_value / account_size) * 100, 2),
             "constraints": {
                 "max_position_shares": max_shares,
                 "max_position_binding": constraints_applied,
-                "max_sector_binding": False,
-            },
-            "metatrader": {
-                "contract_size": round(contract_size, 4) if contract_size else None,
-                "contract_adjusted": mt5_contract_adjustment,
             },
             "methods_compared": {
                 "fixed_fractional": {"shares": ff_shares, "value": round(ff_value, 2)},

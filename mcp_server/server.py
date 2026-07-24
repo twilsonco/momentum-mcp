@@ -62,6 +62,7 @@ from mcp_server.traderdaddy import (
     get_earnings_flow as _get_earnings_flow,
 )
 from mcp_server.position_sizer import calculate_position_size as _calculate_position_size
+from mcp_server.mt5_position_sizer import calculate_mt5_position_size as _calculate_mt5_position_size
 from mcp_server.vcp_screener import screen_vcp as _screen_vcp
 from mcp_server.market_top import detect_market_top as _detect_market_top
 from mcp_server.ftd_detector import detect_ftd as _detect_ftd
@@ -802,25 +803,23 @@ async def get_alpha_signals(
 @mcp.tool()
 async def calculate_position_size(
     ticker: str,
-    account_size: float | None = None,
+    account_size: float,
     risk_pct: float = 1.0,
     entry_price: float | None = None,
     stop_price: float | None = None,
-    max_position_pct: float = 1.0,
+    max_position_pct: float = 10.0,
     method: str = "fixed_fractional",
 ) -> dict[str, Any]:
-    """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
-    Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
-    
-    Integrates with MetaTrader MCP server (if configured) to fetch account balance and contract sizes
-    for accurate Forex/CFD position sizing. If account_size is None, fetches from MT5 account.
+    """Calculate risk-based position size for stock trading.
+    Answers 'how many shares should I buy?' using Fixed Fractional, ATR, or Kelly methods.
     
     Args:
-        ticker: Stock ticker or symbol (e.g., "AAPL", "XAUUSD").
-        account_size: Total account size. If None, fetches from MetaTrader MCP server.
+        ticker: Stock ticker symbol (e.g., "AAPL", "MSFT").
+        account_size: Total account size in dollars (required).
         risk_pct: Percentage of account to risk (default 1%).
         entry_price: Entry price (fetched live if not provided, 5s timeout).
         stop_price: Stop loss price (calculated from ATR if not provided, 10s timeout).
+        max_position_pct: Maximum position size as % of account (default 10%).
         method: "fixed_fractional" (default), "atr", or "kelly".
     """
     res = await _calculate_position_size(
@@ -830,6 +829,42 @@ async def calculate_position_size(
         entry_price=entry_price,
         stop_price=stop_price,
         max_position_pct=max_position_pct,
+        method=method,
+    )
+    return res.dict()
+
+
+@mcp.tool()
+async def calculate_mt5_position_size(
+    symbol: str,
+    stop_price: float,
+    position_direction: str = "long",
+    account_size: float | None = None,
+    entry_price: float | None = None,
+    risk_pct: float = 1.0,
+    method: str = "fixed_fractional",
+) -> dict[str, Any]:
+    """Calculate risk-based position size for MT5 forex/metals/futures/indices trading.
+    
+    Uses MetaTrader MCP server to fetch real-time account balance, symbol data, and pricing.
+    Validates provided parameters against live MT5 data and reports discrepancies.
+    
+    Args:
+        symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "BTCUSD").
+        stop_price: Stop loss price (required, user decision).
+        position_direction: "long" (entry < stop) or "short" (entry > stop). Default "long".
+        account_size: Account balance in account currency. If None, fetches from MT5.
+        entry_price: Entry price. If None, uses current bid/ask from MT5.
+        risk_pct: Percentage of account to risk (default 1%).
+        method: "fixed_fractional" (default) or "kelly".
+    """
+    res = await _calculate_mt5_position_size(
+        symbol=symbol,
+        stop_price=stop_price,
+        position_direction=position_direction,
+        account_size=account_size,
+        entry_price=entry_price,
+        risk_pct=risk_pct,
         method=method,
     )
     return res.dict()
