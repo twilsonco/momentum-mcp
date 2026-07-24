@@ -80,16 +80,15 @@ async def calculate_position_size(
     win_rate: float | None = 0.5,  # for Kelly default
     avg_win: float | None = 2.0,   # for Kelly default
     avg_loss: float | None = 1.0,  # for Kelly default
-    mt5_symbol: str | None = None,  # MetaTrader symbol (e.g., "EURUSD") if different from ticker
 ) -> SignalResult:
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
     Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
     
-    If mt5_symbol is provided and MetaTrader MCP server is configured, fetches contract size
-    and symbol info from MetaTrader for more accurate Forex/CFD position sizing.
+    If MetaTrader MCP server is configured, fetches contract size and symbol info for more
+    accurate Forex/CFD position sizing.
     
     Args:
-        ticker: Stock ticker or symbol name (e.g., "AAPL", "EURUSD").
+        ticker: Stock ticker or symbol name (e.g., "AAPL", "XAUUSD").
         account_size: Total account size in account currency.
         risk_pct: Percentage of account to risk per trade (default 1%).
         entry_price: Entry price (fetched live if None).
@@ -100,24 +99,22 @@ async def calculate_position_size(
         win_rate: Win rate for Kelly criterion (default 0.5).
         avg_win: Average win size for Kelly (default 2.0).
         avg_loss: Average loss size for Kelly (default 1.0).
-        mt5_symbol: MetaTrader symbol name if different from ticker (enables MT5 integration).
         
     Returns:
         SignalResult with position size recommendation and detailed metrics.
     """
     try:
         ticker = ticker.strip().upper()
-        mt5_symbol_to_use = (mt5_symbol or ticker).strip().upper()
         
-        # Fetch MetaTrader contract size if symbol is provided and MT5 is configured
+        # Fetch MetaTrader contract size if MT5 is configured
         contract_size = None
-        if mt5_symbol is not None and MT5_MCP_URL:  # Only fetch if explicitly provided and MT5 is configured
+        if MT5_MCP_URL:
             try:
-                symbol_info = await _get_mt5_symbol_info(mt5_symbol_to_use)
+                symbol_info = await _get_mt5_symbol_info(ticker)
                 if symbol_info and "contract_size" in symbol_info:
                     contract_size = symbol_info["contract_size"]
             except Exception as e:
-                logger.warning(f"Could not fetch contract size from MT5 for {mt5_symbol_to_use}: {e}")
+                logger.warning(f"Could not fetch contract size from MT5 for {ticker}: {e}")
         
         # 1. Fetch live price if entry_price is None
         if entry_price is None:
@@ -269,7 +266,6 @@ async def calculate_position_size(
                 "max_sector_binding": False,
             },
             "metatrader": {
-                "mt5_symbol": mt5_symbol_to_use if mt5_symbol is not None else None,
                 "contract_size": round(contract_size, 4) if contract_size else None,
                 "contract_adjusted": mt5_contract_adjustment,
             },
