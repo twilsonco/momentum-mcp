@@ -802,7 +802,7 @@ async def get_alpha_signals(
 @mcp.tool()
 async def calculate_position_size(
     ticker: str,
-    account_size: float,
+    account_size: float | None = None,
     risk_pct: float = 1.0,
     entry_price: float | None = None,
     stop_price: float | None = None,
@@ -812,15 +812,15 @@ async def calculate_position_size(
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
     Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
     
-    Integrates with MetaTrader MCP server (if configured) to fetch contract sizes
-    and symbol info for accurate Forex/CFD position sizing.
+    Integrates with MetaTrader MCP server (if configured) to fetch account balance and contract sizes
+    for accurate Forex/CFD position sizing. If account_size is None, fetches from MT5 account.
     
     Args:
         ticker: Stock ticker or symbol (e.g., "AAPL", "XAUUSD").
-        account_size: Total account size.
+        account_size: Total account size. If None, fetches from MetaTrader MCP server.
         risk_pct: Percentage of account to risk (default 1%).
-        entry_price: Entry price (fetched live if not provided).
-        stop_price: Stop loss price (calculated from ATR if not provided).
+        entry_price: Entry price (fetched live if not provided, 5s timeout).
+        stop_price: Stop loss price (calculated from ATR if not provided, 10s timeout).
         method: "fixed_fractional" (default), "atr", or "kelly".
     """
     res = await _calculate_position_size(

@@ -32,7 +32,7 @@ async def _get_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
     """Fetch symbol contract size from MetaTrader MCP server.
     
     Args:
-        symbol: MetaTrader symbol (e.g., "EURUSD").
+        symbol: MetaTrader symbol (e.g., "XAUUSD").
         
     Returns:
         Dict with 'contract_size' key, or None if unavailable.
@@ -68,9 +68,48 @@ async def _get_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
         logger.warning(f"Could not fetch symbol info from MT5 for {symbol}: {e}")
         return None
 
+
+async def _get_mt5_account_info() -> dict[str, Any] | None:
+    """Fetch account balance and info from MetaTrader MCP server.
+    
+    Returns:
+        Dict with 'balance' and other account fields, or None if unavailable.
+    """
+    if not MT5_MCP_URL:
+        return None
+    
+    try:
+        client = _get_mt5_client()
+        result = await client.call_tool("get_account_info", {})
+        
+        # Extract account info from response
+        account_info = {}
+        for content in result.content:
+            if hasattr(content, "text"):
+                text = content.text
+                # Parse response lines for balance, equity, etc.
+                try:
+                    lines = text.split("\n")
+                    for line in lines:
+                        line_lower = line.lower()
+                        if "balance" in line_lower and "balance:" in line_lower:
+                            parts = line.split(":")
+                            if len(parts) > 1:
+                                account_info["balance"] = float(parts[1].strip())
+                        elif "equity" in line_lower and "equity:" in line_lower:
+                            parts = line.split(":")
+                            if len(parts) > 1:
+                                account_info["equity"] = float(parts[1].strip())
+                except (ValueError, AttributeError):
+                    pass
+        return account_info if account_info else None
+    except Exception as e:
+        logger.warning(f"Could not fetch account info from MT5: {e}")
+        return None
+
 async def calculate_position_size(
     ticker: str,
-    account_size: float,
+    account_size: float | None = None,
     risk_pct: float = 1.0,          # % of account to risk per trade
     entry_price: float | None = None,
     stop_price: float | None = None,
@@ -84,15 +123,15 @@ async def calculate_position_size(
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
     Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
     
-    If MetaTrader MCP server is configured, fetches contract size and symbol info for more
-    accurate Forex/CFD position sizing.
+    If MetaTrader MCP server is configured and account_size is None, fetches account balance.
+    Also fetches contract size and symbol info for more accurate Forex/CFD position sizing.
     
     Args:
         ticker: Stock ticker or symbol name (e.g., "AAPL", "XAUUSD").
-        account_size: Total account size in account currency.
+        account_size: Total account size in account currency. If None, fetches from MT5.
         risk_pct: Percentage of account to risk per trade (default 1%).
-        entry_price: Entry price (fetched live if None).
-        stop_price: Stop loss price (calculated from ATR if None).
+        entry_price: Entry price (fetched live if None, with 5s timeout).
+        stop_price: Stop loss price (calculated from ATR if None, with 10s timeout).
         max_position_pct: Maximum position size as % of account (default 10%).
         max_sector_pct: Maximum sector exposure (placeholder, default 25%).
         method: Position sizing method - "fixed_fractional", "atr", or "kelly" (default fixed_fractional).
@@ -105,6 +144,18 @@ async def calculate_position_size(
     """
     try:
         ticker = ticker.strip().upper()
+        
+        # Fetch account size from MT5 if not provided
+        if account_size is None:
+            try:
+                account_info = await _get_mt5_account_info()
+                if account_info and "balance" in account_info:
+                    account_size = account_info["balance"]
+                    logger.info(f"Fetched account balance from MT5: ${account_size:,.2f}")
+                else:
+                    return SignalResult.error_msg("Could not fetch account balance from MetaTrader MCP server and no account_size provided")
+            except Exception as e:
+                return SignalResult.error_msg(f"Failed to fetch account size from MT5: {e}")
         
         # Fetch MetaTrader contract size if MT5 is configured
         contract_size = None
@@ -119,16 +170,25 @@ async def calculate_position_size(
         # 1. Fetch live price if entry_price is None
         if entry_price is None:
             try:
-                entry_price = await get_live_price(ticker)
+                # Use asyncio.wait_for to timeout after 5 seconds
+                entry_price = await asyncio.wait_for(get_live_price(ticker), timeout=5.0)
+            except asyncio.TimeoutError:
+                return SignalResult.error_msg(f"Timeout fetching live price for {ticker} (exceeded 5s)")
             except Exception as e:
                 return SignalResult.error_msg(f"Could not fetch live price for {ticker}: {e}")
         
-        # 2. Get ATR(14) if needed (for stop_price or atr method)
+        # 2. Get ATR(14) if needed (for stop_price or atr method), but with timeout and graceful fallback
         atr_14 = None
         if stop_price is None or method == "atr":
-            tech_res = await analyze_technicals(ticker)
-            if tech_res.status == "success":
-                atr_14 = tech_res.data.get("atr_14")
+            try:
+                # Use asyncio.wait_for to timeout after 10 seconds
+                tech_res = await asyncio.wait_for(analyze_technicals(ticker), timeout=10.0)
+                if tech_res.status == "success":
+                    atr_14 = tech_res.data.get("atr_14")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout fetching technicals for {ticker}, using fallback stop")
+            except Exception as e:
+                logger.warning(f"Could not fetch technicals for {ticker}: {e}, using fallback stop")
             
         if stop_price is None:
             if atr_14:
