@@ -810,8 +810,18 @@ async def calculate_position_size(
     max_position_pct: float = 10.0,
     method: str = "fixed_fractional",
 ) -> dict[str, Any]:
-    """Calculate risk-based position size for stock trading.
+    """Calculate risk-based position size for stock trading (non-MT5).
+    
     Answers 'how many shares should I buy?' using Fixed Fractional, ATR, or Kelly methods.
+    Fetches live stock prices and calculates ATR-based stops automatically.
+    
+    Use this tool when:
+    - Trading stocks through a traditional broker (not MetaTrader5)
+    - You want ATR-based stop loss calculation
+    - Account size must be provided (not managed by MT5)
+    
+    For MT5-tradeable symbols (stocks or otherwise) with live MT5 account data, 
+    use calculate_mt5_position_size instead.
     
     Args:
         ticker: Stock ticker symbol (e.g., "AAPL", "MSFT").
@@ -844,13 +854,20 @@ async def calculate_mt5_position_size(
     risk_pct: float = 1.0,
     method: str = "fixed_fractional",
 ) -> dict[str, Any]:
-    """Calculate risk-based position size for MT5 forex/metals/futures/indices trading.
+    """Calculate risk-based position size for any MT5-tradeable symbol.
     
-    Uses MetaTrader MCP server to fetch real-time account balance, symbol data, and pricing.
-    Validates provided parameters against live MT5 data and reports discrepancies.
+    Works with stocks, forex, commodities, indices, cryptocurrencies, or any asset
+    available on MetaTrader5. Fetches real-time account balance, symbol data, and
+    pricing from MetaTrader MCP server. Validates provided parameters against live
+    MT5 data and reports discrepancies.
+    
+    Use this tool when:
+    - Trading through MetaTrader5 (any symbol: stocks, forex, metals, etc.)
+    - Account size is managed by MT5 broker
+    - Need fractional lot support and real-time MT5 data validation
     
     Args:
-        symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "BTCUSD").
+        symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
         stop_price: Stop loss price (required, user decision).
         position_direction: "long" (entry < stop) or "short" (entry > stop). Default "long".
         account_size: Account balance in account currency. If None, fetches from MT5.

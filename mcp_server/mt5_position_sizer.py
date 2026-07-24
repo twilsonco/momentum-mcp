@@ -1,8 +1,9 @@
 """
-MT5 Position Sizer — Position sizing for Forex, Metals, Futures, Indices via MetaTrader MCP.
+MT5 Position Sizer — Position sizing for any MT5-tradeable symbol via MetaTrader MCP.
 
+Supports stocks, forex, commodities, indices, cryptocurrencies, and more.
 Uses the MetaTrader MCP server to fetch real-time account info, symbol data, and pricing.
-Supports long and short positions with proper risk calculations for any MT5-tradeable asset.
+Supports long and short positions with proper risk calculations for any MT5 asset.
 
 The tool fetches optional parameters from MT5 if not provided and validates provided parameters
 against live MT5 data, reporting any discrepancies.
@@ -111,14 +112,15 @@ async def calculate_mt5_position_size(
     risk_pct: float = 1.0,
     method: str = "fixed_fractional",
 ) -> SignalResult:
-    """Calculate risk-based position size for MT5 forex/metals/futures trading.
+    """Calculate risk-based position size for any MT5-tradeable symbol.
     
-    Fetches real-time account balance, symbol contract size, and current price from 
-    MetaTrader MCP server (if configured). Validates provided parameters against live 
-    MT5 data and reports any discrepancies.
+    Works with stocks, forex, commodities, indices, cryptocurrencies, or any asset
+    available on MetaTrader5. Fetches real-time account balance, symbol contract size, 
+    and current price from MetaTrader MCP server (if configured). Validates provided 
+    parameters against live MT5 data and reports any discrepancies.
     
     Args:
-        symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "BTCUSD").
+        symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
         stop_price: Stop loss price (user decision, required).
         position_direction: "long" (entry < stop) or "short" (entry > stop). Default "long".
         account_size: Account balance in account currency. If None, fetches from MT5.
