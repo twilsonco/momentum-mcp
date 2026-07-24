@@ -212,15 +212,15 @@ async def calculate_mt5_position_size(
         
         # Validate setup
         if position_direction == "long":
-            if entry_price >= stop_price:
+            if entry_price <= stop_price:
                 return SignalResult.error_msg(
-                    f"Invalid long setup for {symbol}: Entry ({entry_price}) >= Stop ({stop_price})"
+                    f"Invalid long setup for {symbol}: Entry ({entry_price}) must be > Stop ({stop_price})"
                 )
             risk_per_unit = entry_price - stop_price
         else:  # short
-            if entry_price <= stop_price:
+            if entry_price >= stop_price:
                 return SignalResult.error_msg(
-                    f"Invalid short setup for {symbol}: Entry ({entry_price}) <= Stop ({stop_price})"
+                    f"Invalid short setup for {symbol}: Entry ({entry_price}) must be < Stop ({stop_price})"
                 )
             risk_per_unit = stop_price - entry_price
         
