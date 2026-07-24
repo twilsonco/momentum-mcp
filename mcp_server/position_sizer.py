@@ -148,6 +148,7 @@ async def calculate_position_size(
             constraints_applied = True
         
         # Adjust to contract size if available from MetaTrader
+        # Using floor() to strictly respect risk caps: we never increase position size to fit contracts
         mt5_contract_adjustment = False
         mt5_contract_adjustment_warning = False
         if contract_size and contract_size > 0:
@@ -155,32 +156,31 @@ async def calculate_position_size(
             if contract_size < 0.001:
                 logger.warning(f"Contract size {contract_size} for {ticker} seems too small, skipping adjustment")
             else:
-                # Adjust to contract size if available from MetaTrader
-                mt5_contract_adjustment = False
-                mt5_contract_adjustment_warning = False
-                num_contracts = round(shares / contract_size)
-                # Calculate adjusted shares (may be fractional due to floating-point arithmetic)
-                contract_adjusted_shares_float = num_contracts * contract_size
-                # Convert to integer, but preserve precision before conversion
-                contract_adjusted_shares = int(round(contract_adjusted_shares_float))
+                # Use floor() to round down to nearest contract multiple, never exceeding risk cap
+                # This ensures we stay within risk parameters even if it means taking fewer contracts
+                num_contracts = int(math.floor(shares / contract_size))
                 
-                # Check if adjustment was needed (use tolerance for floating-point comparison)
-                if abs(contract_adjusted_shares - shares) > 0.01:
-                    mt5_contract_adjustment = True
-                    # Warn if adjustment increases position size beyond risk parameters
-                    if contract_adjusted_shares > shares and contract_adjusted_shares > 0:
-                        mt5_contract_adjustment_warning = True
-                        logger.warning(
-                            f"Contract size adjustment increases position from {shares} to {contract_adjusted_shares} shares, "
-                            f"exceeding risk parameters for {ticker}"
+                # Calculate adjusted shares based on floor'd contract count
+                if num_contracts > 0:
+                    contract_adjusted_shares = num_contracts * contract_size
+                    
+                    # Check if adjustment was needed (use tolerance for floating-point comparison)
+                    if abs(contract_adjusted_shares - shares) > 0.01:
+                        mt5_contract_adjustment = True
+                        # Note: floor() ensures adjustment never increases position size
+                        logger.debug(
+                            f"Adjusted {ticker} position from {shares} to {contract_adjusted_shares} shares "
+                            f"to align with {contract_size} contract size"
                         )
-                    # Only use adjusted value if it's positive; otherwise warn and skip adjustment
-                    if contract_adjusted_shares > 0:
                         shares = contract_adjusted_shares
                         position_value = shares * entry_price
-                    else:
-                        logger.warning(f"Contract size adjustment results in 0 shares for {ticker}, skipping adjustment")
-                        mt5_contract_adjustment = False
+                else:
+                    # Position size too small to fill even one contract
+                    mt5_contract_adjustment_warning = True
+                    logger.warning(
+                        f"Position size for {ticker} ({shares} shares) is smaller than contract size "
+                        f"({contract_size}), cannot adjust to contract size"
+                    )
 
         # Summary
         summary = (

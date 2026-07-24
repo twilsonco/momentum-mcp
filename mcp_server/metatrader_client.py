@@ -27,26 +27,57 @@ METATRADER_MCP_ENABLED = os.getenv("METATRADER_MCP_ENABLED", "true" if METATRADE
 
 
 class MetaTraderMCPClient:
-    """Async client to call MetaTrader MCP server tools via SSE transport."""
+    """Async client to call MetaTrader MCP server tools via SSE transport.
     
-    def __init__(self, base_url: str):
+    Supports both context manager usage (automatic session lifecycle management)
+    and persistent session usage (for reuse across multiple calls).
+    """
+    
+    # Class-level persistent session to avoid recreating connections
+    _persistent_session: Optional[aiohttp.ClientSession] = None
+    
+    def __init__(self, base_url: str, use_persistent_session: bool = False):
         """Initialize the MCP client.
         
         Args:
             base_url: Base URL of the MetaTrader MCP server (e.g., http://localhost:8080)
+            use_persistent_session: If True, use a persistent session shared across instances.
+                                   If False, use a temporary session (for context manager use).
         """
         self.base_url = base_url.rstrip("/")
+        self.use_persistent_session = use_persistent_session
         self.session: Optional[aiohttp.ClientSession] = None
+        self._owns_session = False  # Track if this instance created the session
     
     async def __aenter__(self):
         """Context manager entry."""
-        self.session = aiohttp.ClientSession()
+        if not self.use_persistent_session:
+            self.session = aiohttp.ClientSession()
+            self._owns_session = True
+        else:
+            await self._ensure_persistent_session()
+            self.session = self._persistent_session
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
-        if self.session:
+        # Only close session if we created it (not using persistent session)
+        if self._owns_session and self.session:
             await self.session.close()
+            self._owns_session = False
+    
+    @classmethod
+    async def _ensure_persistent_session(cls):
+        """Ensure the persistent session exists."""
+        if cls._persistent_session is None or cls._persistent_session.closed:
+            cls._persistent_session = aiohttp.ClientSession()
+    
+    @classmethod
+    async def close_persistent_session(cls):
+        """Close the persistent session. Call this during app shutdown."""
+        if cls._persistent_session and not cls._persistent_session.closed:
+            await cls._persistent_session.close()
+            cls._persistent_session = None
     
     async def _call_tool(self, tool_name: str, **kwargs) -> Any:
         """Call a tool on the MetaTrader MCP server via JSON-RPC.
@@ -141,6 +172,7 @@ async def get_symbol_contract_size_from_mt5(symbol: str) -> Optional[float]:
     """Fetch contract size from MetaTrader MCP server if available.
     
     This is a convenience wrapper that handles configuration and error handling.
+    Uses a persistent session to avoid creating/closing connections on every call.
     Returns None if the server is not configured or unreachable.
     
     Args:
@@ -154,7 +186,7 @@ async def get_symbol_contract_size_from_mt5(symbol: str) -> Optional[float]:
         return None
     
     try:
-        async with MetaTraderMCPClient(METATRADER_MCP_URL) as client:
+        async with MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True) as client:
             contract_size = await client.get_symbol_contract_size(symbol)
             logger.info(f"Fetched contract size for {symbol} from MetaTrader MCP: {contract_size}")
             return contract_size
@@ -167,6 +199,7 @@ async def get_symbol_price_from_mt5(symbol: str) -> Optional[dict[str, float]]:
     """Fetch price info from MetaTrader MCP server if available.
     
     This is a convenience wrapper that handles configuration and error handling.
+    Uses a persistent session to avoid creating/closing connections on every call.
     Returns None if the server is not configured or unreachable.
     
     Args:
@@ -180,7 +213,7 @@ async def get_symbol_price_from_mt5(symbol: str) -> Optional[dict[str, float]]:
         return None
     
     try:
-        async with MetaTraderMCPClient(METATRADER_MCP_URL) as client:
+        async with MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True) as client:
             price_info = await client.get_symbol_price(symbol)
             logger.info(f"Fetched price info for {symbol} from MetaTrader MCP")
             return price_info
