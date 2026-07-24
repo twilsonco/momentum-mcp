@@ -41,31 +41,26 @@ async def _get_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
         return None
     
     try:
+        import json
         client = _get_mt5_client()
         result = await client.call_tool(
-            "get_symbol_info",
+            "get_symbol_contract_size",
             {"symbol_name": symbol},
         )
         
         # Extract contract size from response
         for content in result.content:
             if hasattr(content, "text"):
-                # Parse response text for contract_size
-                text = content.text
-                if "contract_size" in text.lower():
-                    # Simple extraction — adjust based on actual response format
-                    try:
-                        lines = text.split("\n")
-                        for line in lines:
-                            if "contract_size" in line.lower():
-                                parts = line.split(":")
-                                if len(parts) > 1:
-                                    return {"contract_size": float(parts[1].strip())}
-                    except (ValueError, AttributeError):
-                        pass
+                text = content.text.strip()
+                # Response is either a JSON number or plain number
+                try:
+                    contract_size = float(text)
+                    return {"contract_size": contract_size}
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not parse contract size from MT5 response for {symbol}: {text}")
         return None
     except Exception as e:
-        logger.warning(f"Could not fetch symbol info from MT5 for {symbol}: {e}")
+        logger.warning(f"Could not fetch contract size from MT5 for {symbol}: {e}")
         return None
 
 
@@ -79,30 +74,21 @@ async def _get_mt5_account_info() -> dict[str, Any] | None:
         return None
     
     try:
+        import json
         client = _get_mt5_client()
         result = await client.call_tool("get_account_info", {})
         
-        # Extract account info from response
-        account_info = {}
+        # Extract account info from response — returns JSON
         for content in result.content:
             if hasattr(content, "text"):
-                text = content.text
-                # Parse response lines for balance, equity, etc.
+                text = content.text.strip()
                 try:
-                    lines = text.split("\n")
-                    for line in lines:
-                        line_lower = line.lower()
-                        if "balance" in line_lower and "balance:" in line_lower:
-                            parts = line.split(":")
-                            if len(parts) > 1:
-                                account_info["balance"] = float(parts[1].strip())
-                        elif "equity" in line_lower and "equity:" in line_lower:
-                            parts = line.split(":")
-                            if len(parts) > 1:
-                                account_info["equity"] = float(parts[1].strip())
-                except (ValueError, AttributeError):
-                    pass
-        return account_info if account_info else None
+                    account_info = json.loads(text)
+                    if isinstance(account_info, dict) and "balance" in account_info:
+                        return account_info
+                except (json.JSONDecodeError, AttributeError):
+                    logger.warning(f"Could not parse account info from MT5 response: {text}")
+        return None
     except Exception as e:
         logger.warning(f"Could not fetch account info from MT5: {e}")
         return None

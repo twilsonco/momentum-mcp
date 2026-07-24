@@ -806,7 +806,7 @@ async def calculate_position_size(
     risk_pct: float = 1.0,
     entry_price: float | None = None,
     stop_price: float | None = None,
-    max_position_pct: float = 10.0,
+    max_position_pct: float = 1.0,
     method: str = "fixed_fractional",
 ) -> dict[str, Any]:
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
