@@ -159,7 +159,10 @@ async def calculate_position_size(
                 num_contracts = round(shares / contract_size)
                 if num_contracts <= 0:
                     num_contracts = 1  # Minimum 1 contract
-                contract_adjusted_shares = int(num_contracts * contract_size)
+                # Use round() instead of int() to avoid truncation of fractional contract sizes
+                contract_adjusted_shares = round(num_contracts * contract_size)
+                # Ensure the result is a positive integer
+                contract_adjusted_shares = max(1, int(contract_adjusted_shares) if contract_adjusted_shares >= 1 else 1)
                 
                 if contract_adjusted_shares != shares:
                     mt5_contract_adjustment = True
