@@ -2,25 +2,71 @@
 Position sizing module — Fixed Fractional, ATR-based, and Kelly Criterion.
 
 Answers: "How many shares/contracts should I buy?"
-Integrates with MetaTrader MCP server (if configured) to fetch contract sizes
-and symbol information for more accurate Forex/CFD position sizing.
+Integrates with MetaTrader MCP server (if configured via MT5_MCP_URL) to fetch
+contract sizes and symbol information for more accurate Forex/CFD position sizing.
 """
 from __future__ import annotations
+
 import asyncio
 import logging
 import math
+import os
 from typing import Any
 
+from dotenv import load_dotenv
+
 from mcp_server.schema import SignalResult
-from mcp_server.data import get_live_price
+from mcp_server.data import get_live_price, MT5_MCP_URL, _get_mt5_client
 from mcp_server.technicals import analyze_technicals
-from mcp_server.metatrader_client import get_symbol_contract_size_from_mt5
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
 # Constants for contract size adjustment
 MIN_VALID_CONTRACT_SIZE = 0.001  # Minimum valid contract size threshold
 FLOAT_TOLERANCE = 0.01          # Tolerance for floating-point comparison
+
+
+async def _get_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
+    """Fetch symbol contract size from MetaTrader MCP server.
+    
+    Args:
+        symbol: MetaTrader symbol (e.g., "EURUSD").
+        
+    Returns:
+        Dict with 'contract_size' key, or None if unavailable.
+    """
+    if not MT5_MCP_URL:
+        return None
+    
+    try:
+        client = _get_mt5_client()
+        result = await client.call_tool(
+            "get_symbol_info",
+            {"symbol_name": symbol},
+        )
+        
+        # Extract contract size from response
+        for content in result.content:
+            if hasattr(content, "text"):
+                # Parse response text for contract_size
+                text = content.text
+                if "contract_size" in text.lower():
+                    # Simple extraction — adjust based on actual response format
+                    try:
+                        lines = text.split("\n")
+                        for line in lines:
+                            if "contract_size" in line.lower():
+                                parts = line.split(":")
+                                if len(parts) > 1:
+                                    return {"contract_size": float(parts[1].strip())}
+                    except (ValueError, AttributeError):
+                        pass
+        return None
+    except Exception as e:
+        logger.warning(f"Could not fetch symbol info from MT5 for {symbol}: {e}")
+        return None
 
 async def calculate_position_size(
     ticker: str,
@@ -65,9 +111,11 @@ async def calculate_position_size(
         
         # Fetch MetaTrader contract size if symbol is provided and MT5 is configured
         contract_size = None
-        if mt5_symbol is not None:  # Only fetch if explicitly provided
+        if mt5_symbol is not None and MT5_MCP_URL:  # Only fetch if explicitly provided and MT5 is configured
             try:
-                contract_size = await get_symbol_contract_size_from_mt5(mt5_symbol_to_use)
+                symbol_info = await _get_mt5_symbol_info(mt5_symbol_to_use)
+                if symbol_info and "contract_size" in symbol_info:
+                    contract_size = symbol_info["contract_size"]
             except Exception as e:
                 logger.warning(f"Could not fetch contract size from MT5 for {mt5_symbol_to_use}: {e}")
         
