@@ -112,8 +112,12 @@ class MetaTraderMCPClient:
         Raises:
             ValueError: If the tool call fails or server is not reachable.
         """
+        # Ensure session is initialized
         if not self.session:
-            raise ValueError("Session not initialized. Use async context manager: async with MetaTraderMCPClient(...) as client")
+            if self.use_persistent_session:
+                self.session = await self.get_persistent_session()
+            else:
+                raise ValueError("Session not initialized. Use async context manager: async with MetaTraderMCPClient(...) as client")
         
         # Build JSON-RPC request
         payload = {
@@ -207,7 +211,6 @@ async def get_symbol_contract_size_from_mt5(symbol: str) -> Optional[float]:
     
     try:
         client = MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True)
-        client.session = await client.get_persistent_session()
         contract_size = await client.get_symbol_contract_size(symbol)
         logger.info(f"Fetched contract size for {symbol} from MetaTrader MCP: {contract_size}")
         return contract_size
@@ -235,7 +238,6 @@ async def get_symbol_price_from_mt5(symbol: str) -> Optional[dict[str, float]]:
     
     try:
         client = MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True)
-        client.session = await client.get_persistent_session()
         price_info = await client.get_symbol_price(symbol)
         logger.info(f"Fetched price info for {symbol} from MetaTrader MCP")
         return price_info

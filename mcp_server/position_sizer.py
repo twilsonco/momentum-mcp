@@ -162,7 +162,7 @@ async def calculate_position_size(
             else:
                 # Use floor() to round down to nearest contract multiple, never exceeding risk cap
                 # This ensures we stay within risk parameters even if it means taking fewer contracts
-                num_contracts = int(math.floor(shares / contract_size))
+                num_contracts = int(shares / contract_size)
                 
                 # Calculate adjusted shares based on floor'd contract count
                 if num_contracts > 0:
@@ -199,7 +199,7 @@ async def calculate_position_size(
         if mt5_contract_adjustment:
             summary += f"\n- ✓ Adjusted to {contract_size} contract size (MetaTrader)."
         if mt5_contract_adjustment_warning:
-            summary += f"\n- ⚠️ Warning: Position size is smaller than contract size ({contract_size}), cannot adjust to contract size."
+            summary += f"\n- ⚠️ Position size is smaller than contract size ({contract_size}), cannot adjust to contract size."
 
         data = {
             "ticker": ticker,
