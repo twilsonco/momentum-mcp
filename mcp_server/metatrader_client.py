@@ -63,8 +63,6 @@ class MetaTraderMCPClient:
         """
         if not self.session:
             raise ValueError("Session not initialized. Use async context manager: async with MetaTraderMCPClient(...) as client")
-
-
         
         # Build JSON-RPC request
         payload = {

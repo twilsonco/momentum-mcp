@@ -149,6 +149,7 @@ async def calculate_position_size(
         
         # Adjust to contract size if available from MetaTrader
         mt5_contract_adjustment = False
+        mt5_contract_adjustment_warning = False
         if contract_size and contract_size > 0:
             # Validate contract_size is reasonable (not too small)
             if contract_size < 0.001:
@@ -156,17 +157,27 @@ async def calculate_position_size(
             else:
                 # Round shares to nearest contract multiple (for Forex/CFD trading)
                 # For both integer contract sizes (e.g., 100) and fractional ones (e.g., 0.001)
-                num_contracts = max(1, round(shares / contract_size))  # Minimum 1 contract
+                num_contracts = round(shares / contract_size)
                 # Round to integer to avoid floating-point precision issues
                 contract_adjusted_shares = int(round(num_contracts * contract_size))
-                # Ensure at least 1 share
-                contract_adjusted_shares = max(1, contract_adjusted_shares)
                 
                 # Check if adjustment was needed (tolerance for floating-point comparison)
-                if abs(contract_adjusted_shares - shares) > 0.5:
+                if contract_adjusted_shares != shares:
                     mt5_contract_adjustment = True
-                    shares = contract_adjusted_shares
-                    position_value = shares * entry_price
+                    # Warn if adjustment increases position size beyond risk parameters
+                    if contract_adjusted_shares > shares and contract_adjusted_shares > 0:
+                        mt5_contract_adjustment_warning = True
+                        logger.warning(
+                            f"Contract size adjustment increases position from {shares} to {contract_adjusted_shares} shares, "
+                            f"exceeding risk parameters for {ticker}"
+                        )
+                    # Only use adjusted value if it's positive; otherwise warn and skip adjustment
+                    if contract_adjusted_shares > 0:
+                        shares = contract_adjusted_shares
+                        position_value = shares * entry_price
+                    else:
+                        logger.warning(f"Contract size adjustment results in 0 shares for {ticker}, skipping adjustment")
+                        mt5_contract_adjustment = False
 
         # Summary
         summary = (
@@ -180,6 +191,8 @@ async def calculate_position_size(
             summary += f"\n- ⚠️ Capped by {max_position_pct}% max position constraint."
         if mt5_contract_adjustment:
             summary += f"\n- ✓ Adjusted to {contract_size} contract size (MetaTrader)."
+        if mt5_contract_adjustment_warning:
+            summary += f"\n- ⚠️ Warning: Contract size adjustment increased position size beyond risk parameters."
 
         data = {
             "ticker": ticker,
