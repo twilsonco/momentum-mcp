@@ -150,12 +150,21 @@ async def calculate_position_size(
         # Adjust to contract size if available from MetaTrader
         mt5_contract_adjustment = False
         if contract_size and contract_size > 0:
-            # Round shares to nearest contract multiple (for Forex/CFD trading)
-            contract_adjusted_shares = int((shares / contract_size)) * int(contract_size)
-            if contract_adjusted_shares != shares:
-                mt5_contract_adjustment = True
-                shares = max(int(contract_size), contract_adjusted_shares)  # Ensure at least one contract
-                position_value = shares * entry_price
+            # Validate contract_size is reasonable (not too small)
+            if contract_size < 0.001:
+                logger.warning(f"Contract size {contract_size} for {ticker} seems too small, skipping adjustment")
+            else:
+                # Round shares to nearest contract multiple (for Forex/CFD trading)
+                # For both integer contract sizes (e.g., 100) and fractional ones (e.g., 0.001)
+                num_contracts = round(shares / contract_size)
+                if num_contracts <= 0:
+                    num_contracts = 1  # Minimum 1 contract
+                contract_adjusted_shares = int(num_contracts * contract_size)
+                
+                if contract_adjusted_shares != shares:
+                    mt5_contract_adjustment = True
+                    shares = contract_adjusted_shares
+                    position_value = shares * entry_price
 
         # Summary
         summary = (

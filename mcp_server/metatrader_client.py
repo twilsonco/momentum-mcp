@@ -109,11 +109,14 @@ class MetaTraderMCPClient:
             Contract size as a float.
             
         Raises:
-            ValueError: If the symbol not found or call fails.
+            ValueError: If the symbol not found, contract size is invalid, or call fails.
         """
         result = await self._call_tool("get_symbol_contract_size", symbol_name=symbol)
         if isinstance(result, (int, float)):
-            return float(result)
+            contract_size = float(result)
+            if contract_size <= 0:
+                raise ValueError(f"Invalid contract size for {symbol}: {contract_size} (must be positive)")
+            return contract_size
         raise ValueError(f"Unexpected contract size response for {symbol}: {result}")
     
     async def get_symbol_price(self, symbol: str) -> dict[str, float]:
