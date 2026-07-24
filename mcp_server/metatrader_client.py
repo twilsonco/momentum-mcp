@@ -49,7 +49,7 @@ class MetaTraderMCPClient:
             await self.session.close()
     
     async def _call_tool(self, tool_name: str, **kwargs) -> Any:
-        """Call a tool on the MetaTrader MCP server via JSON-RPC over SSE.
+        """Call a tool on the MetaTrader MCP server via JSON-RPC.
         
         Args:
             tool_name: Name of the tool to call.
@@ -62,12 +62,12 @@ class MetaTraderMCPClient:
             ValueError: If the tool call fails or server is not reachable.
         """
         if not self.session:
-            self.session = aiohttp.ClientSession()
+            raise ValueError("Session not initialized. Use context manager: async with MetaTraderMCPClient(...) as client:")
         
         # Build JSON-RPC request
         payload = {
             "jsonrpc": "2.0",
-            "method": f"tools/call",
+            "method": "tools/call",
             "params": {
                 "name": tool_name,
                 "arguments": kwargs,

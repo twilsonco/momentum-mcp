@@ -19,6 +19,10 @@
 
 ## Changelog
 
+**July 24, 2026 — MetaTrader MCP Integration**
+- **Position Sizing Enhancement:** `calculate_position_size` now integrates with MetaTrader MCP server (if configured) to fetch contract sizes for accurate Forex/CFD position sizing.
+- **Optional MetaTrader Integration:** Set `METATRADER_MCP_URL` environment variable to enable contract size fetching from MetaTrader MCP server.
+
 **April 26, 2026 — The "Constellation" Update**
 - **Massive 35-Tool Expansion:** Merged in the complete Phase 2 toolset from the internal workspace.
 - **Options (VoPR™ Engine):** Added `analyze_options_setup`, `find_best_to_sell`, `find_best_to_buy`, and `sweep_setups` for intelligent options grading.
@@ -241,6 +245,34 @@ momentum-mcp/
 | [mplfinance](https://pypi.org/project/mplfinance/) | Financial chart rendering |
 | [feedparser](https://pypi.org/project/feedparser/) | RSS/Atom feed parsing |
 | [trafilatura](https://pypi.org/project/trafilatura/) | Web article text extraction |
+| [aiohttp](https://pypi.org/project/aiohttp/) | Async HTTP client (MetaTrader MCP integration) |
+
+## Optional: MetaTrader MCP Integration
+
+If you're using momentum-mcp with the [metatrader-mcp-server](https://github.com/twilsonco/metatrader-mcp-server), you can enable contract size fetching for more accurate Forex/CFD position sizing:
+
+```bash
+export METATRADER_MCP_URL="http://localhost:8080"
+python -m mcp_server.server
+```
+
+Then use `calculate_position_size` with the `mt5_symbol` parameter:
+
+```python
+# Example: EUR/USD position sizing with MetaTrader contract size
+await calculate_position_size(
+    ticker="EURUSD",
+    account_size=10000,
+    risk_pct=1.0,
+    mt5_symbol="EURUSD"  # Enable MetaTrader integration
+)
+```
+
+The tool will automatically fetch:
+- **Contract size** — Standard lot size for the symbol
+- **Symbol info** — Trading specifications from your MetaTrader account
+
+If MetaTrader MCP server is not configured or unreachable, position sizing falls back to standard calculations.
 
 ## Example Prompts
 
