@@ -808,23 +808,22 @@ async def calculate_position_size(
     stop_price: float | None = None,
     max_position_pct: float = 10.0,
     method: str = "fixed_fractional",
-    win_rate: float | None = 0.5,
-    avg_win: float | None = 2.0,
-    avg_loss: float | None = 1.0,
+    mt5_symbol: str | None = None,
 ) -> dict[str, Any]:
     """Calculate risk-based position size using Fixed Fractional, ATR, or Kelly methods.
     Answers 'how many shares/contracts should I buy?' given account size and risk tolerance.
-
+    
+    Optionally integrates with MetaTrader MCP server (if configured) to fetch contract sizes
+    and symbol info for accurate Forex/CFD position sizing.
+    
     Args:
-        account_size: Total account value in dollars.
-        risk_pct: % of account to risk per trade. Default: 1.0.
-        entry_price: Optional entry price. If None, fetches live price.
-        stop_price: Optional stop price. If None, uses 2x ATR(14) or 5% fallback.
-        max_position_pct: Max % of account in one position. Default: 10.0.
-        method: 'fixed_fractional', 'atr', or 'kelly'. Default: 'fixed_fractional'.
-        win_rate: For Kelly method. Default: 0.5.
-        avg_win: For Kelly method (avg win/loss ratio). Default: 2.0.
-        avg_loss: For Kelly method. Default: 1.0.
+        ticker: Stock ticker or symbol (e.g., "AAPL", "EURUSD").
+        account_size: Total account size.
+        risk_pct: Percentage of account to risk (default 1%).
+        entry_price: Entry price (fetched live if not provided).
+        stop_price: Stop loss price (calculated from ATR if not provided).
+        method: "fixed_fractional" (default), "atr", or "kelly".
+        mt5_symbol: MetaTrader symbol name (enables MT5 integration for contract size).
     """
     res = await _calculate_position_size(
         ticker=ticker,
@@ -834,9 +833,7 @@ async def calculate_position_size(
         stop_price=stop_price,
         max_position_pct=max_position_pct,
         method=method,
-        win_rate=win_rate,
-        avg_win=avg_win,
-        avg_loss=avg_loss,
+        mt5_symbol=mt5_symbol,
     )
     return res.dict()
 
