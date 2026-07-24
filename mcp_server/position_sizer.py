@@ -195,7 +195,7 @@ async def calculate_position_size(
         if mt5_contract_adjustment:
             summary += f"\n- ✓ Adjusted to {contract_size} contract size (MetaTrader)."
         if mt5_contract_adjustment_warning:
-            summary += f"\n- ⚠️ Warning: Contract size adjustment increased position size beyond risk parameters."
+            summary += f"\n- ⚠️ Warning: Position size is smaller than contract size ({contract_size}), cannot adjust to contract size."
 
         data = {
             "ticker": ticker,

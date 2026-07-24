@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 METATRADER_MCP_URL = os.getenv("METATRADER_MCP_URL", "").strip()
 METATRADER_MCP_ENABLED = os.getenv("METATRADER_MCP_ENABLED", "true" if METATRADER_MCP_URL else "false").lower() == "true"
 
+# Lock for thread-safe persistent session management
+_persistent_session_lock = asyncio.Lock()
+
 
 class MetaTraderMCPClient:
     """Async client to call MetaTrader MCP server tools via SSE transport.
@@ -68,16 +71,19 @@ class MetaTraderMCPClient:
     
     @classmethod
     async def _ensure_persistent_session(cls):
-        """Ensure the persistent session exists."""
-        if cls._persistent_session is None or cls._persistent_session.closed:
-            cls._persistent_session = aiohttp.ClientSession()
+        """Ensure the persistent session exists (thread-safe)."""
+        async with _persistent_session_lock:
+            # Double-check pattern: check again after acquiring lock
+            if cls._persistent_session is None or cls._persistent_session.closed:
+                cls._persistent_session = aiohttp.ClientSession()
     
     @classmethod
     async def close_persistent_session(cls):
         """Close the persistent session. Call this during app shutdown."""
-        if cls._persistent_session and not cls._persistent_session.closed:
-            await cls._persistent_session.close()
-            cls._persistent_session = None
+        async with _persistent_session_lock:
+            if cls._persistent_session and not cls._persistent_session.closed:
+                await cls._persistent_session.close()
+                cls._persistent_session = None
     
     async def _call_tool(self, tool_name: str, **kwargs) -> Any:
         """Call a tool on the MetaTrader MCP server via JSON-RPC.
@@ -186,10 +192,12 @@ async def get_symbol_contract_size_from_mt5(symbol: str) -> Optional[float]:
         return None
     
     try:
-        async with MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True) as client:
-            contract_size = await client.get_symbol_contract_size(symbol)
-            logger.info(f"Fetched contract size for {symbol} from MetaTrader MCP: {contract_size}")
-            return contract_size
+        client = MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True)
+        await client._ensure_persistent_session()
+        client.session = client._persistent_session
+        contract_size = await client.get_symbol_contract_size(symbol)
+        logger.info(f"Fetched contract size for {symbol} from MetaTrader MCP: {contract_size}")
+        return contract_size
     except Exception as e:
         logger.warning(f"Failed to fetch contract size for {symbol} from MetaTrader MCP: {e}")
         return None
@@ -213,10 +221,12 @@ async def get_symbol_price_from_mt5(symbol: str) -> Optional[dict[str, float]]:
         return None
     
     try:
-        async with MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True) as client:
-            price_info = await client.get_symbol_price(symbol)
-            logger.info(f"Fetched price info for {symbol} from MetaTrader MCP")
-            return price_info
+        client = MetaTraderMCPClient(METATRADER_MCP_URL, use_persistent_session=True)
+        await client._ensure_persistent_session()
+        client.session = client._persistent_session
+        price_info = await client.get_symbol_price(symbol)
+        logger.info(f"Fetched price info for {symbol} from MetaTrader MCP")
+        return price_info
     except Exception as e:
         logger.warning(f"Failed to fetch price for {symbol} from MetaTrader MCP: {e}")
         return None
