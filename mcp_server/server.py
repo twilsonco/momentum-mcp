@@ -872,18 +872,34 @@ async def calculate_mt5_position_size(
         stop_price: Stop loss price (required, user decision).
         risk_pct: Percentage of account to risk (default 1%).
     """
+    import asyncio
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+    
+    logger.info(f"MT5 position sizer called: symbol={symbol}, direction={position_direction}, stop={stop_price}")
+    
     try:
-        res = await _calculate_mt5_position_size(
-            symbol=symbol,
-            position_direction=position_direction,
-            stop_price=stop_price,
-            risk_pct=risk_pct,
+        # Add 30s top-level timeout to prevent hanging
+        res = await asyncio.wait_for(
+            _calculate_mt5_position_size(
+                symbol=symbol,
+                position_direction=position_direction,
+                stop_price=stop_price,
+                risk_pct=risk_pct,
+            ),
+            timeout=30.0
         )
+        logger.info(f"MT5 position sizer completed successfully for {symbol}")
         return res.dict()
+    except asyncio.TimeoutError:
+        logger.error(f"MT5 position sizer TIMEOUT (30s) for {symbol}")
+        return {
+            "status": "error",
+            "data": None,
+            "error": f"Position sizing timeout (30s) for {symbol}. MT5 MCP may be unreachable."
+        }
     except Exception as e:
-        import logging
-        import traceback
-        logger = logging.getLogger(__name__)
         logger.error(f"calculate_mt5_position_size crashed: {e}")
         logger.error(f"Traceback: {traceback.format_exc()}")
         # Return error response instead of letting exception kill server

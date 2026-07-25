@@ -149,6 +149,11 @@ async def calculate_mt5_position_size(
     try:
         symbol = symbol.strip().upper()
         
+        if not MT5_MCP_URL:
+            return SignalResult.error_msg(
+                "MetaTrader MCP URL not configured. Cannot fetch MT5 data."
+            )
+        
         # Validate stop_price
         if stop_price <= 0:
             return SignalResult.error_msg(f"stop_price must be positive, got {stop_price}")
