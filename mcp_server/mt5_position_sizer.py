@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 from typing import Any
 
 from mcp_server.data import MT5_MCP_URL, _get_mt5_client
@@ -150,6 +151,7 @@ async def calculate_mt5_position_size(
     Returns:
         SignalResult with position size in lots, account validation, and price comparison.
     """
+    start_time = time.time()
     try:
         symbol = symbol.strip().upper()
         position_direction = position_direction.strip().lower()
@@ -168,8 +170,11 @@ async def calculate_mt5_position_size(
             return SignalResult.error_msg(f"stop_price must be positive, got {stop_price}")
         
         # Fetch MT5 data
+        fetch_start = time.time()
         account_info = await _fetch_mt5_account_info()
         symbol_info = await _fetch_mt5_symbol_info(symbol)
+        fetch_elapsed = time.time() - fetch_start
+        logger.info(f"MT5 data fetch completed in {fetch_elapsed:.2f}s (account: {bool(account_info)}, symbol: {bool(symbol_info)})")
         
         # Build validation report
         validation_report = {
@@ -302,8 +307,11 @@ async def calculate_mt5_position_size(
             "summary": summary,
         }
         
+        total_time = time.time() - start_time
+        logger.info(f"calculate_mt5_position_size({symbol}) completed in {total_time:.2f}s")
         return SignalResult.success(data)
     
     except Exception as e:
-        logger.error(f"MT5 position sizing failed for {symbol}: {e}")
+        total_time = time.time() - start_time
+        logger.error(f"MT5 position sizing failed for {symbol} after {total_time:.2f}s: {e}")
         return SignalResult.error_msg(str(e))
