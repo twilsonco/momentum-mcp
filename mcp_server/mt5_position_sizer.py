@@ -125,12 +125,9 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
 
 async def calculate_mt5_position_size(
     symbol: str,
-    stop_price: float,
-    position_direction: str = "long",
-    account_size: float | None = None,
-    entry_price: float | None = None,
+    position_direction: str,
+    stop_price: float = 0.0,
     risk_pct: float = 1.0,
-    method: str = "fixed_fractional",
 ) -> SignalResult:
     """Calculate risk-based position size for any MT5-tradeable symbol.
     
@@ -143,10 +140,7 @@ async def calculate_mt5_position_size(
         symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
         stop_price: Stop loss price (user decision, required).
         position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop). Default "long".
-        account_size: Account balance in account currency. If None, fetches from MT5.
-        entry_price: Entry price. If None, uses current bid/ask from MT5.
         risk_pct: Percentage of account to risk per trade (default 1%).
-        method: Position sizing method - "fixed_fractional" (default) or "kelly".
         
     Returns:
         SignalResult with position size in lots, account validation, and price comparison.
@@ -154,16 +148,6 @@ async def calculate_mt5_position_size(
     start_time = time.time()
     try:
         symbol = symbol.strip().upper()
-        position_direction = position_direction.strip().lower()
-        if position_direction == "buy":
-            position_direction = "long"
-        elif position_direction == "sell":
-            position_direction = "short"
-        
-        if position_direction not in ("long", "short"):
-            return SignalResult.error_msg(
-                f"Invalid position_direction '{position_direction}'. Must be 'long', 'short', 'buy', or 'sell'."
-            )
         
         # Validate stop_price
         if stop_price <= 0:
@@ -176,36 +160,33 @@ async def calculate_mt5_position_size(
         fetch_elapsed = time.time() - fetch_start
         logger.info(f"MT5 data fetch completed in {fetch_elapsed:.2f}s (account: {bool(account_info)}, symbol: {bool(symbol_info)})")
         
-        # Build validation report
-        validation_report = {
-            "mt5_configured": bool(MT5_MCP_URL),
-            "account_data_available": bool(account_info),
-            "symbol_data_available": bool(symbol_info),
-            "discrepancies": [],
-        }
-        
         # Account size
         mt5_balance = None
         if account_info and "balance" in account_info:
             mt5_balance = account_info["balance"]
-            validation_report["mt5_balance"] = mt5_balance
         
-        if account_size is None:
-            if mt5_balance is not None:
-                account_size = mt5_balance
-                logger.info(f"Fetched account balance from MT5: ${account_size:,.2f}")
-            else:
-                return SignalResult.error_msg(
-                    "account_size parameter required. MetaTrader MCP not configured or not responding."
-                )
+        if mt5_balance is not None:
+            account_size = mt5_balance
+            logger.info(f"Fetched account balance from MT5: ${account_size:,.2f}")
         else:
-            if mt5_balance is not None and abs(account_size - mt5_balance) > 0.01:
-                validation_report["discrepancies"].append({
-                    "field": "account_size",
-                    "provided": account_size,
-                    "mt5_value": mt5_balance,
-                    "note": "MT5 value differs from provided parameter",
-                })
+            return SignalResult.error_msg(
+                "Failed to fetch account balance from MT5. MetaTrader MCP not configured or not responding."
+            )
+
+        position_direction = position_direction.strip().lower()
+        if not position_direction:
+            return SignalResult.error_msg(
+                "Position direction must be specified."
+            )
+        else:
+            if position_direction == "buy":
+                position_direction = "long"
+            elif position_direction == "sell":
+                position_direction = "short"
+            elif position_direction not in ["long", "short"]:
+                return SignalResult.error_msg(
+                    f"Invalid position_direction '{position_direction}'. Must be 'long', 'short', 'buy', or 'sell'."
+                )
         
         # Entry price
         mt5_price = None
@@ -217,28 +198,18 @@ async def calculate_mt5_position_size(
                 else:
                     mt5_price = price_data.get("bid")
         
-        if entry_price is None:
-            if mt5_price is not None:
-                entry_price = mt5_price
-                logger.info(f"Fetched {position_direction} entry price from MT5: {entry_price}")
-            else:
-                return SignalResult.error_msg(
-                    "entry_price parameter required. MetaTrader MCP not configured or symbol not found."
-                )
+        if mt5_price is not None:
+            entry_price = mt5_price
+            logger.info(f"Fetched {position_direction} entry price from MT5: {entry_price}")
         else:
-            if mt5_price is not None and abs(entry_price - mt5_price) > 0.01:
-                validation_report["discrepancies"].append({
-                    "field": "entry_price",
-                    "provided": entry_price,
-                    "mt5_value": mt5_price,
-                    "note": "MT5 current price differs from provided entry price",
-                })
+            return SignalResult.error_msg(
+                "Failed to fetch entry price from MT5. MetaTrader MCP not configured or symbol not found."
+            )
         
         # Contract size
         contract_size = None
         if symbol_info and symbol_info.get("contract_size"):
             contract_size = symbol_info["contract_size"]
-            validation_report["contract_size"] = contract_size
         
         # Validate setup
         if position_direction == "long":
@@ -303,7 +274,6 @@ async def calculate_mt5_position_size(
             "actual_risk": round(actual_risk, 2),
             "actual_risk_pct": round(actual_risk_pct, 2),
             "contract_size": round(contract_size, 4) if contract_size else None,
-            "validation": validation_report,
             "summary": summary,
         }
         

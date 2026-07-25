@@ -851,19 +851,15 @@ async def calculate_position_size(
 @mcp.tool()
 async def calculate_mt5_position_size(
     symbol: str,
-    stop_price: float,
-    position_direction: str = "long",
-    account_size: float | None = None,
-    entry_price: float | None = None,
+    position_direction: str,
+    stop_price: float = 0.0,
     risk_pct: float = 1.0,
-    method: str = "fixed_fractional",
 ) -> dict[str, Any]:
     """Calculate risk-based position size for any MT5-tradeable symbol.
     
     Works with stocks, forex, commodities, indices, cryptocurrencies, or any asset
     available on MetaTrader5. Fetches real-time account balance, symbol data, and
-    pricing from MetaTrader MCP server. Validates provided parameters against live
-    MT5 data and reports discrepancies.
+    pricing from MetaTrader MCP server.
     
     Use this tool when:
     - Trading through MetaTrader5 (any symbol: stocks, forex, metals, etc.)
@@ -872,22 +868,16 @@ async def calculate_mt5_position_size(
     
     Args:
         symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
+        position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop).
         stop_price: Stop loss price (required, user decision).
-        position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop). Default "long".
-        account_size: Account balance in account currency. If None, fetches from MT5.
-        entry_price: Entry price. If None, uses current bid/ask from MT5.
         risk_pct: Percentage of account to risk (default 1%).
-        method: "fixed_fractional" (default) or "kelly".
     """
     try:
         res = await _calculate_mt5_position_size(
             symbol=symbol,
-            stop_price=stop_price,
             position_direction=position_direction,
-            account_size=account_size,
-            entry_price=entry_price,
+            stop_price=stop_price,
             risk_pct=risk_pct,
-            method=method,
         )
         return res.dict()
     except Exception as e:
