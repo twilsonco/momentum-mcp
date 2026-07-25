@@ -11,6 +11,7 @@ against live MT5 data, reporting any discrepancies.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -34,7 +35,10 @@ async def _fetch_mt5_account_info() -> dict[str, Any] | None:
     
     try:
         client = _get_mt5_client()
-        result = await client.call_tool("get_account_info", {})
+        result = await asyncio.wait_for(
+            client.call_tool("get_account_info", {}),
+            timeout=5.0
+        )
         
         for content in result.content:
             if hasattr(content, "text"):
@@ -45,6 +49,9 @@ async def _fetch_mt5_account_info() -> dict[str, Any] | None:
                         return account_info
                 except json.JSONDecodeError:
                     logger.warning(f"Could not parse account info: {text}")
+        return None
+    except asyncio.TimeoutError:
+        logger.warning(f"Timeout fetching account info from MT5 MCP (5s)")
         return None
     except Exception as e:
         logger.warning(f"Could not fetch account info from MT5: {e}")
@@ -66,31 +73,43 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
     try:
         client = _get_mt5_client()
         
-        # Get contract size
-        contract_result = await client.call_tool(
-            "get_symbol_contract_size",
-            {"symbol_name": symbol},
-        )
+        # Get contract size (3s timeout)
         contract_size = None
-        for content in contract_result.content:
-            if hasattr(content, "text"):
-                try:
-                    contract_size = float(content.text.strip())
-                except (ValueError, TypeError):
-                    pass
+        try:
+            contract_result = await asyncio.wait_for(
+                client.call_tool(
+                    "get_symbol_contract_size",
+                    {"symbol_name": symbol},
+                ),
+                timeout=3.0
+            )
+            for content in contract_result.content:
+                if hasattr(content, "text"):
+                    try:
+                        contract_size = float(content.text.strip())
+                    except (ValueError, TypeError):
+                        pass
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout fetching contract size for {symbol} from MT5 MCP (3s)")
         
-        # Get current price
+        # Get current price (3s timeout)
         price_info = None
-        price_result = await client.call_tool(
-            "get_symbol_price",
-            {"symbol_name": symbol},
-        )
-        for content in price_result.content:
-            if hasattr(content, "text"):
-                try:
-                    price_info = json.loads(content.text.strip())
-                except json.JSONDecodeError:
-                    pass
+        try:
+            price_result = await asyncio.wait_for(
+                client.call_tool(
+                    "get_symbol_price",
+                    {"symbol_name": symbol},
+                ),
+                timeout=3.0
+            )
+            for content in price_result.content:
+                if hasattr(content, "text"):
+                    try:
+                        price_info = json.loads(content.text.strip())
+                    except json.JSONDecodeError:
+                        pass
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout fetching price for {symbol} from MT5 MCP (3s)")
         
         if contract_size is not None:
             return {
