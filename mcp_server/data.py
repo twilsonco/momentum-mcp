@@ -21,7 +21,7 @@ import io
 import logging
 import os
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -91,6 +91,37 @@ def _period_to_count(period: str, interval: str) -> int:
     else:
         count = trading_days
     return min(max(count, 1), 5000)
+
+
+def _date_range_covers_period(records: list[dict[str, Any]], period: str) -> bool:
+    """Check if the date range of records covers the requested period.
+    
+    For calendar-based periods (1d, 5d, etc.), verify that the bars span
+    at least ~90% of the expected calendar days.
+    """
+    if not records or len(records) < 2:
+        return False
+    
+    # Parse first and last timestamps
+    from dateutil import parser
+    try:
+        first_dt = parser.parse(records[0]["date"])
+        last_dt = parser.parse(records[-1]["date"])
+    except Exception:
+        return True  # If we can't parse, assume OK
+    
+    # Map period to expected calendar days
+    period_days_map = {
+        "1d": 1, "5d": 5, "1mo": 30, "3mo": 90, "6mo": 180,
+        "1y": 365, "2y": 730, "5y": 1825, "10y": 3650,
+        "ytd": 365, "max": 3650,
+    }
+    
+    expected_days = period_days_map.get(period, 30)
+    actual_days = (last_dt - first_dt).days
+    
+    # Accept if we cover at least 70% of expected calendar days
+    return actual_days >= (expected_days * 0.70)
 
 
 def _is_source_available(source: str) -> bool:
@@ -163,6 +194,7 @@ async def get_historical_data(
     ]
 
     errors: list[str] = []
+    
     for source_name, fetcher in sources:
         if not _is_source_available(source_name):
             logger.debug("Source %s not configured, skipping", source_name)
@@ -173,6 +205,16 @@ async def get_historical_data(
             else:
                 records = await fetcher(ticker, period, interval)
             if records:
+                # Check if data covers the requested period; if not, try next source
+                if not _date_range_covers_period(records, period):
+                    msg = (
+                        f"Incomplete date range from {source_name}: got {len(records)} bars "
+                        f"spanning only {(pd.to_datetime(records[-1]['date']) - pd.to_datetime(records[0]['date'])).days} days "
+                        f"for {ticker} (requested {period}). Trying next source..."
+                    )
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue  # Try next source
                 logger.info(
                     "Fetched %d bars for %s from %s (period=%s, interval=%s)",
                     len(records), ticker, source_name, period, interval,
@@ -184,8 +226,9 @@ async def get_historical_data(
             errors.append(msg)
 
     raise ValueError(
-        f"All data sources failed for '{ticker}' "
-        f"(period={period}, interval={interval}). Errors: {'; '.join(errors)}"
+        f"All data sources failed or returned incomplete data for '{ticker}' "
+        f"(period={period}, interval={interval}). "
+        f"Errors: {'; '.join(errors)}"
     )
 
 
@@ -196,22 +239,47 @@ async def get_historical_data(
 def _fetch_from_yfinance(
     ticker: str, period: str, interval: str
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV from yfinance. Raises ValueError on failure."""
+    """Fetch OHLCV from yfinance. Tries multiple ticker formats for forex pairs.
+    
+    For forex (e.g., EURUSD), tries formats: EURUSD, EURUSD=X, EUR-USD.
+    """
     with _yf_lock:
-        try:
-            df = yf.download(
-                ticker,
-                period=period,
-                interval=interval,
-                progress=False,
-                auto_adjust=True,
-                threads=False,
-            )
-        except Exception as exc:
-            logger.error("yfinance download failed for %s: %s", ticker, exc)
+        # Build list of ticker formats to try
+        ticker_formats = [ticker]
+        
+        # For forex pairs (4-letter-4-letter format), try common variations
+        if len(ticker) == 6 and ticker.isalpha():
+            base = ticker[:3]
+            quote = ticker[3:]
+            ticker_formats.extend([
+                f"{base}{quote}=X",    # EURUSD=X
+                f"{base}-{quote}",     # EUR-USD
+            ])
+        
+        last_exc = None
+        for fmt in ticker_formats:
+            try:
+                df = yf.download(
+                    fmt,
+                    period=period,
+                    interval=interval,
+                    progress=False,
+                    auto_adjust=True,
+                    threads=False,
+                )
+                if df is not None and not df.empty:
+                    logger.debug("yfinance succeeded with format: %s", fmt)
+                    break
+            except Exception as exc:
+                last_exc = exc
+                logger.debug("yfinance format %s failed: %s", fmt, exc)
+                continue
+        else:
+            # All formats failed
+            logger.error("yfinance download failed for %s (all formats): %s", ticker, last_exc)
             raise ValueError(
-                f"yfinance failed for '{ticker}': {exc}"
-            ) from exc
+                f"yfinance failed for '{ticker}' (tried formats: {', '.join(ticker_formats)}): {last_exc}"
+            ) from last_exc
 
         if df is None or df.empty:
             raise ValueError(

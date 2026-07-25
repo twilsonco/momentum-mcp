@@ -53,7 +53,7 @@ from mcp_server.screener import run_stock_screen as _run_stock_screen
 from mcp_server.screener import run_custom_screen as _run_custom_screen
 from mcp_server.data import get_historical_data as _get_historical_data
 from mcp_server.technicals import analyze_technicals as _analyze_technicals
-from mcp_server.charts import generate_chart as _generate_chart
+from mcp_server.charts import generate_chart as _generate_chart, ChartResult
 from mcp_server.news import (
     fetch_ticker_news as _fetch_ticker_news,
     extract_article_text as _extract_article_text,
@@ -363,7 +363,10 @@ async def get_tv_analysis(
 async def generate_chart(
     ticker: str, period: str = "5d", interval: str = "1h",
     show_emas: bool = True,
-) -> dict[str, Any]:
+    entry_price: float | None = None,
+    stop_loss_price: float | None = None,
+    take_profit_price: float | None = None,
+) -> ChartResult:
     """Generate a candlestick chart with EMA overlays (8/21/34/55/89).
 
     Returns a JSON dict with chart metadata and the on-disk PNG path.
@@ -374,13 +377,27 @@ async def generate_chart(
     — it returns the chart as a proper MCP ``ImageContent`` that the
     agent can see.
 
+    Optionally overlays a trading position: horizontal lines for entry,
+    stop loss, and take profit, with auto-detected direction (LONG/SHORT)
+    and risk:reward ratio.
+
     Args:
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to True.
+        entry_price: Optional entry price for a trade position. Drawn
+            as a solid blue horizontal line.
+        stop_loss_price: Optional stop loss price. Drawn as a dashed
+            red horizontal line. Requires ``entry_price``.
+        take_profit_price: Optional take profit price. Drawn as a
+            dashed green horizontal line. Requires ``entry_price``.
     """
     return await _generate_chart(
         ticker=ticker, period=period, interval=interval,
-        show_emas=show_emas, return_image=False,
+        show_emas=show_emas,
+        entry_price=entry_price,
+        stop_loss_price=stop_loss_price,
+        take_profit_price=take_profit_price,
+        return_image=False,
     )
 
 
@@ -388,6 +405,9 @@ async def generate_chart(
 async def generate_chart_image(
     ticker: str, period: str = "5d", interval: str = "1h",
     show_emas: bool = True,
+    entry_price: float | None = None,
+    stop_loss_price: float | None = None,
+    take_profit_price: float | None = None,
 ) -> Image:
     """Generate a candlestick chart with EMA overlays (8/21/34/55/89)
     and return it as a viewable image.
@@ -400,13 +420,27 @@ async def generate_chart_image(
     Use this when you want to visually inspect the chart. Use
     ``generate_chart`` when you only need the file path/metadata.
 
+    Optionally overlays a trading position: horizontal lines for entry,
+    stop loss, and take profit, with auto-detected direction (LONG/SHORT)
+    and risk:reward ratio.
+
     Args:
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to True.
+        entry_price: Optional entry price for a trade position. Drawn
+            as a solid blue horizontal line.
+        stop_loss_price: Optional stop loss price. Drawn as a dashed
+            red horizontal line. Requires ``entry_price``.
+        take_profit_price: Optional take profit price. Drawn as a
+            dashed green horizontal line. Requires ``entry_price``.
     """
     return await _generate_chart(
         ticker=ticker, period=period, interval=interval,
-        show_emas=show_emas, return_image=True,
+        show_emas=show_emas,
+        entry_price=entry_price,
+        stop_loss_price=stop_loss_price,
+        take_profit_price=take_profit_price,
+        return_image=True,
     )
 
 
