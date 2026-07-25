@@ -618,8 +618,14 @@ async def log_conviction(
     reasoning: str, signals: str = "",
 ) -> dict[str, Any]:
     """Log a directional conviction for a ticker.
-    Direction: bullish/bearish/neutral. Confidence: 1-5 scale (1=speculative, 5=slam dunk).
-    Include reasoning for future review. Optional signals: comma-separated tags (e.g. "RSI_oversold,EMA_bullish")."""
+    
+    Args:
+        ticker: The ticker symbol for the asset.
+        direction: one of bullish/bearish/neutral. Also accepts buy/long
+        confidence: 1-5 scale (1=speculative, 5=slam dunk).
+        reasoning: Include reasoning for future review.
+        signals: Optional signals: comma-separated tags (e.g. "RSI_oversold,EMA_bullish").
+    """
     return await _log_conviction(
         ticker=ticker, direction=direction, confidence=confidence,
         reasoning=reasoning, signals=signals,
@@ -634,6 +640,7 @@ async def get_track_record(
     """Get the full conviction journal track record with win/loss stats.
 
     Args:
+        ticker: The ticker symbol for the asset.
         days: How far back to look in days. Default: 90.
     """
     return await _get_track_record(ticker=ticker, days=days)
