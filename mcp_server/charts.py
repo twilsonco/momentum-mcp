@@ -92,6 +92,7 @@ async def generate_chart(
     interval: str = "1d",
     style: str = "dark",
     show_emas: bool = True,
+    show_volume: bool = False,
     entry_price: float | None = None,
     stop_loss_price: float | None = None,
     take_profit_price: float | None = None,
@@ -99,7 +100,7 @@ async def generate_chart(
 ) -> ChartResult | Image:
     """Generate a candlestick chart with EMA overlays for a ticker symbol.
 
-    Fetches OHLCV data, renders a candlestick chart with volume panel
+    Fetches OHLCV data, renders a candlestick chart with optional volume panel
     and stacked EMA overlays (8/21/34/55/89) using ``mplfinance``, saves
     the PNG to the ``./charts/`` directory, and returns either:
 
@@ -125,6 +126,8 @@ async def generate_chart(
             supported. Reserved for future expansion.
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to ``True``.
+        show_volume: Whether to display the volume panel below the chart.
+            Defaults to ``False``.
         entry_price: Optional entry price for a trade position. Drawn
             as a solid blue horizontal line. When provided together
             with ``stop_loss_price`` and/or ``take_profit_price``, the
@@ -264,7 +267,7 @@ async def generate_chart(
         plot_kwargs: dict[str, Any] = {
             "type": "candle",
             "style": _STYLE,
-            "volume": True,
+            "volume": show_volume,
             "figsize": (14, 8),
             "tight_layout": True,
             "warn_too_much_data": 500,

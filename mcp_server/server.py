@@ -363,6 +363,7 @@ async def get_tv_analysis(
 async def generate_chart(
     ticker: str, period: str = "5d", interval: str = "1h",
     show_emas: bool = True,
+    show_volume: bool = False,
     entry_price: float | None = None,
     stop_loss_price: float | None = None,
     take_profit_price: float | None = None,
@@ -384,6 +385,8 @@ async def generate_chart(
     Args:
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to True.
+        show_volume: Whether to display the volume panel below the chart.
+            Defaults to False.
         entry_price: Optional entry price for a trade position. Drawn
             as a solid blue horizontal line.
         stop_loss_price: Optional stop loss price. Drawn as a dashed
@@ -394,6 +397,7 @@ async def generate_chart(
     return await _generate_chart(
         ticker=ticker, period=period, interval=interval,
         show_emas=show_emas,
+        show_volume=show_volume,
         entry_price=entry_price,
         stop_loss_price=stop_loss_price,
         take_profit_price=take_profit_price,
@@ -405,6 +409,7 @@ async def generate_chart(
 async def generate_chart_image(
     ticker: str, period: str = "5d", interval: str = "1h",
     show_emas: bool = True,
+    show_volume: bool = False,
     entry_price: float | None = None,
     stop_loss_price: float | None = None,
     take_profit_price: float | None = None,
@@ -427,6 +432,8 @@ async def generate_chart_image(
     Args:
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to True.
+        show_volume: Whether to display the volume panel below the chart.
+            Defaults to False.
         entry_price: Optional entry price for a trade position. Drawn
             as a solid blue horizontal line.
         stop_loss_price: Optional stop loss price. Drawn as a dashed
@@ -437,6 +444,7 @@ async def generate_chart_image(
     return await _generate_chart(
         ticker=ticker, period=period, interval=interval,
         show_emas=show_emas,
+        show_volume=show_volume,
         entry_price=entry_price,
         stop_loss_price=stop_loss_price,
         take_profit_price=take_profit_price,
