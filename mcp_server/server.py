@@ -873,7 +873,7 @@ async def calculate_mt5_position_size(
     Args:
         symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
         stop_price: Stop loss price (required, user decision).
-        position_direction: "long" (entry < stop) or "short" (entry > stop). Default "long".
+        position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop). Default "long".
         account_size: Account balance in account currency. If None, fetches from MT5.
         entry_price: Entry price. If None, uses current bid/ask from MT5.
         risk_pct: Percentage of account to risk (default 1%).

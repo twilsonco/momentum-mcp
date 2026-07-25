@@ -122,7 +122,7 @@ async def calculate_mt5_position_size(
     Args:
         symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
         stop_price: Stop loss price (user decision, required).
-        position_direction: "long" (entry < stop) or "short" (entry > stop). Default "long".
+        position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop). Default "long".
         account_size: Account balance in account currency. If None, fetches from MT5.
         entry_price: Entry price. If None, uses current bid/ask from MT5.
         risk_pct: Percentage of account to risk per trade (default 1%).
@@ -134,10 +134,14 @@ async def calculate_mt5_position_size(
     try:
         symbol = symbol.strip().upper()
         position_direction = position_direction.strip().lower()
+        if position_direction == "buy":
+            position_direction = "long"
+        elif position_direction == "sell":
+            position_direction = "short"
         
         if position_direction not in ("long", "short"):
             return SignalResult.error_msg(
-                f"Invalid position_direction '{position_direction}'. Must be 'long' or 'short'."
+                f"Invalid position_direction '{position_direction}'. Must be 'long', 'short', 'buy', or 'sell'."
             )
         
         # Validate stop_price
@@ -240,9 +244,10 @@ async def calculate_mt5_position_size(
         # Convert to lots if contract size is available
         position_lots = position_units / contract_size if contract_size else position_units
         
-        # Round to minimum lot size (0.01 for MT5)
+        # Round to nearest minimum lot size (0.01 for MT5) for accuracy
+        # Rounding to nearest gives better risk target accuracy than floor()
         min_lot_size = 0.01
-        position_lots_rounded = math.floor(position_lots / min_lot_size) * min_lot_size
+        position_lots_rounded = round(position_lots / min_lot_size) * min_lot_size
         position_units_final = position_lots_rounded * contract_size if contract_size else position_lots_rounded
         
         # Actual risk after rounding
