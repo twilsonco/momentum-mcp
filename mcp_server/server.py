@@ -271,7 +271,20 @@ async def get_historical_data(
 ) -> list[dict[str, Any]]:
     """Fetch OHLCV historical price data for a stock.
     """
-    return await _get_historical_data(ticker=ticker, period=period, interval=interval)
+    from mcp_server.data import _get_mt5_client
+    
+    # Call the underlying function
+    result = await _get_historical_data(ticker=ticker, period=period, interval=interval)
+    
+    # Explicitly disconnect MT5 client after getting data to prevent
+    # Python 3.14 anyio cancel scope error during FastMCP response serialization
+    try:
+        client = _get_mt5_client()
+        await client._disconnect()
+    except Exception:
+        pass  # Ignore cleanup errors
+    
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -292,7 +305,17 @@ async def analyze_technicals(
     Returns: EMA 8/21/34/55/89, SMA 50/100/200, RSI(14), MACD(12,26,9), ADX(14), ATR(14),
     Williams %R, Stochastic, Bollinger Bands, CCI(20). Latest readings + analysis summary.
     """
+    from mcp_server.data import _get_mt5_client
+    
     res = await _analyze_technicals(ticker=ticker, period=period, interval=interval)
+    
+    # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
+    try:
+        client = _get_mt5_client()
+        await client._disconnect()
+    except Exception:
+        pass
+    
     return res.dict()
 
 
@@ -874,6 +897,15 @@ async def calculate_position_size(
         max_position_pct=max_position_pct,
         method=method,
     )
+    
+    # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
+    from mcp_server.data import _get_mt5_client
+    try:
+        client = _get_mt5_client()
+        await client._disconnect()
+    except Exception:
+        pass
+    
     return res.dict()
 
 
@@ -934,6 +966,14 @@ async def calculate_mt5_position_size(
         result_dict = res.model_dump()
         with open(debug_log, "a") as f:
             f.write(f"[{time.time()}] Returning result dict (keys: {list(result_dict.keys())})\n")
+        
+        # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
+        from mcp_server.data import _get_mt5_client
+        try:
+            client = _get_mt5_client()
+            await client._disconnect()
+        except Exception:
+            pass
         
         return result_dict
     except asyncio.TimeoutError:
