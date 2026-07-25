@@ -313,31 +313,50 @@ class _MT5Client:
             self._cm = None
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
-        """Call a tool with one automatic reconnect on failure."""
+        """Call a tool with one automatic reconnect on failure.
+        
+        NOTE: Suppresses Python 3.14 anyio cleanup errors to prevent
+        FastMCP stdio transport from hanging.
+        """
         import asyncio
         last_exc: Exception | None = None
         for attempt in range(2):
             try:
                 session = await self._ensure_connected()
                 # Add timeout to the tool call itself
-                return await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     session.call_tool(name, args),
                     timeout=15.0  # 15s per tool call
                 )
+                return result
             except asyncio.TimeoutError:
                 last_exc = TimeoutError(f"MT5 MCP tool '{name}' timeout (15s)")
                 logger.warning(
                     "MT5 MCP call '%s' timeout (attempt %d)",
                     name, attempt + 1,
                 )
-                await self._disconnect()
+                # Disconnect on failure, suppressing cleanup errors
+                try:
+                    await self._disconnect()
+                except RuntimeError as e:
+                    if "cancel scope" not in str(e):
+                        raise
+                    # Suppress Python 3.14 anyio cleanup errors
+                    pass
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
                     "MT5 MCP call '%s' failed (attempt %d): %s",
                     name, attempt + 1, exc,
                 )
-                await self._disconnect()
+                # Disconnect on failure, suppressing cleanup errors
+                try:
+                    await self._disconnect()
+                except RuntimeError as e:
+                    if "cancel scope" not in str(e):
+                        raise
+                    # Suppress Python 3.14 anyio cleanup errors
+                    pass
         assert last_exc is not None
         raise last_exc
 

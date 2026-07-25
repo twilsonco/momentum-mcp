@@ -11,10 +11,39 @@ the FastAPI brain via `app.mount("/mcp", mcp.sse_app())`.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
+
+# Suppress Python 3.14 anyio cancel scope errors that occur during SSE client cleanup
+# These are harmless cleanup artifacts when using MT5 MCP SSE client in stdio mode
+warnings.filterwarnings("ignore", message="Attempted to exit cancel scope in a different task")
+
+# Also suppress asyncio async generator cleanup errors
+import asyncio
+import sys
+
+def _suppress_anyio_cleanup_errors(loop, context):
+    """Suppress anyio cancel scope and async generator cleanup errors."""
+    exception = context.get("exception")
+    if exception:
+        exc_str = str(exception)
+        # Suppress the specific Python 3.14 + anyio error
+        if "Attempted to exit cancel scope in a different task" in exc_str:
+            return
+        # Suppress async generator cleanup errors for SSE client
+        if "asynchronous generator" in context.get("message", ""):
+            if "GeneratorExit" in exc_str or "cancel scope" in exc_str:
+                return
+    # Log other exceptions normally
+    loop.default_exception_handler(context)
+
+# Install the exception handler
+loop = asyncio.new_event_loop()
+loop.set_exception_handler(_suppress_anyio_cleanup_errors)
+asyncio.set_event_loop(loop)
 
 load_dotenv()
 
@@ -875,7 +904,14 @@ async def calculate_mt5_position_size(
     import asyncio
     import logging
     import traceback
+    import time
+    
     logger = logging.getLogger(__name__)
+    
+    # Also log to file for debugging stdio transport
+    debug_log = "/tmp/mcp_mt5_debug.log"
+    with open(debug_log, "a") as f:
+        f.write(f"\n[{time.time()}] MT5 position sizer called: symbol={symbol}, direction={position_direction}, stop={stop_price}\n")
     
     logger.info(f"MT5 position sizer called: symbol={symbol}, direction={position_direction}, stop={stop_price}")
     
@@ -890,18 +926,33 @@ async def calculate_mt5_position_size(
             ),
             timeout=30.0
         )
+        with open(debug_log, "a") as f:
+            f.write(f"[{time.time()}] MT5 position sizer completed successfully for {symbol}\n")
         logger.info(f"MT5 position sizer completed successfully for {symbol}")
-        return res.dict()
+        
+        # Use model_dump() for Pydantic v2 compatibility
+        result_dict = res.model_dump()
+        with open(debug_log, "a") as f:
+            f.write(f"[{time.time()}] Returning result dict (keys: {list(result_dict.keys())})\n")
+        
+        return result_dict
     except asyncio.TimeoutError:
-        logger.error(f"MT5 position sizer TIMEOUT (30s) for {symbol}")
+        msg = f"MT5 position sizer TIMEOUT (30s) for {symbol}"
+        with open(debug_log, "a") as f:
+            f.write(f"[{time.time()}] {msg}\n")
+        logger.error(msg)
         return {
             "status": "error",
             "data": None,
             "error": f"Position sizing timeout (30s) for {symbol}. MT5 MCP may be unreachable."
         }
     except Exception as e:
-        logger.error(f"calculate_mt5_position_size crashed: {e}")
-        logger.error(f"Traceback: {traceback.format_exc()}")
+        msg = f"calculate_mt5_position_size crashed: {e}"
+        tb = traceback.format_exc()
+        with open(debug_log, "a") as f:
+            f.write(f"[{time.time()}] {msg}\n{tb}\n")
+        logger.error(msg)
+        logger.error(f"Traceback: {tb}")
         # Return error response instead of letting exception kill server
         return {
             "status": "error",
