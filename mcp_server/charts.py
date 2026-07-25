@@ -21,6 +21,7 @@ import mplfinance as mpf  # noqa: E402
 import pandas as pd  # noqa: E402
 
 from mcp_server.data import get_historical_data  # noqa: E402
+from mcp.server.fastmcp.utilities.types import Image  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -66,13 +67,21 @@ async def generate_chart(
     interval: str = "1d",
     style: str = "dark",
     show_emas: bool = True,
-) -> dict[str, str]:
+    return_image: bool = False,
+) -> dict[str, str] | Image:
     """Generate a candlestick chart with EMA overlays for a ticker symbol.
 
     Fetches OHLCV data, renders a candlestick chart with volume panel
     and stacked EMA overlays (8/21/34/55/89) using ``mplfinance``, saves
-    the PNG to the ``./charts/`` directory, and returns both the file
-    path and a base64-encoded representation.
+    the PNG to the ``./charts/`` directory, and returns either:
+
+    - A FastMCP ``Image`` object (when ``return_image=True``) that the
+      MCP transport serializes as proper ``ImageContent`` so an AI agent
+      can actually *see* the chart.
+    - A JSON dict with metadata + the on-disk path (when
+      ``return_image=False``, the default). The base64 string is no
+      longer included — it was useless to the agent (a VLM cannot
+      "see" a base64 string stuffed in a JSON field) and wasted tokens.
 
     Args:
         ticker: Stock ticker symbol (e.g. ``"AAPL"``).
@@ -84,9 +93,15 @@ async def generate_chart(
             supported. Reserved for future expansion.
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
             Defaults to ``True``.
+        return_image: If ``True``, return a FastMCP ``Image`` object
+            that the MCP transport delivers as ``ImageContent`` so the
+            calling agent can actually view the chart. If ``False``
+            (default), return a JSON dict with metadata and the file
+            path so the agent can reference it by URL/path.
 
     Returns:
-        A dict with:
+        Either a FastMCP ``Image`` (when ``return_image=True``) or a
+        dict with:
 
         - ``ticker`` — The symbol charted.
         - ``period`` — The period used.
@@ -94,7 +109,6 @@ async def generate_chart(
         - ``bars`` — Number of bars rendered.
         - ``emas`` — List of EMA periods overlaid (e.g. [8, 21, 34, 55, 89]).
         - ``path`` — Absolute path to the saved PNG file.
-        - ``base64`` — Base64-encoded PNG string (UTF-8).
 
     Raises:
         ValueError: If the ticker is invalid or returns no data.
@@ -149,7 +163,7 @@ async def generate_chart(
                 ema_periods_used.append(ema_len)
 
     # Render in a background thread
-    def _render() -> tuple[str, str]:
+    def _render() -> tuple[str, bytes]:
         CHARTS_DIR.mkdir(parents=True, exist_ok=True)
         filename = f"{ticker}_{period}_{interval}.png"
         filepath = CHARTS_DIR / filename
@@ -200,12 +214,16 @@ async def generate_chart(
         # Write the same bytes to disk for download
         filepath.write_bytes(raw_bytes)
 
-        b64 = base64.b64encode(raw_bytes).decode("utf-8")
-        return str(filepath.resolve()), b64
+        return str(filepath.resolve()), raw_bytes
 
-    path, b64_str = await asyncio.to_thread(_render)
+    path, raw_bytes = await asyncio.to_thread(_render)
 
     logger.info("Chart saved: %s (%d bars, EMAs: %s)", path, len(df), ema_periods_used)
+
+    if return_image:
+        # Return as a FastMCP Image so the MCP transport serializes it
+        # as proper ImageContent — the agent can actually see the chart.
+        return Image(data=raw_bytes, format="png")
 
     return {
         "ticker": ticker,
@@ -214,5 +232,4 @@ async def generate_chart(
         "bars": len(df),
         "emas": ema_periods_used,
         "path": path,
-        "base64": b64_str,
     }

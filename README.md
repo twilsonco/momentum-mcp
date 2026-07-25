@@ -57,7 +57,8 @@ All of this happens through the [Model Context Protocol](https://modelcontextpro
 | `run_stock_screen` | Scan for stocks by preset: most active, new highs/lows, overbought, oversold, high relative volume |
 | `get_historical_data` | Fetch OHLCV candlestick data — any ticker, any period, any interval |
 | `analyze_technicals` | Compute RSI(14) + MACD(12,26,9) and get a plain-English analysis summary |
-| `generate_chart` | Render a candlestick chart with stacked EMA overlays (8/21/34/55/89) + volume → PNG + base64 |
+| `generate_chart` | Render a candlestick chart with stacked EMA overlays (8/21/34/55/89) + volume → PNG saved to `./charts/` (returns metadata + path) |
+| `generate_chart_image` | Same chart, but returned as a viewable MCP image so the AI agent can actually *see* it |
 | `fetch_ticker_news` | Pull recent headlines from Yahoo Finance & Google News RSS feeds |
 | `extract_article_text` | Extract the full article body from any URL (strips ads, nav, paywalls) |
 

@@ -15,6 +15,7 @@ import warnings
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.utilities.types import Image
 from dotenv import load_dotenv
 
 # Suppress Python 3.14 anyio cancel scope errors that occur during SSE client cleanup
@@ -124,7 +125,7 @@ mcp = FastMCP(
     "momentum",
     instructions=(
         "Welcome to the Momentum MCP Server — powered by TraderDaddy Pro.\n\n"
-        "This server provides 33 quantitative trading tools for AI agents:\n"
+        "This server provides 34 quantitative trading tools for AI agents:\n"
         "• Stock screening (22 presets + custom filters)\n"
         "• Technical analysis (24 indicators: EMA stack, RSI, MACD, ADX, ATR, Bollinger, etc.)\n"
         "• Options analysis via VoPR™ engine (vol surface, Black-Scholes, A-F grading)\n"
@@ -193,7 +194,7 @@ def trading_assistant() -> str:
     """Start a trading analysis session with access to institutional-grade tools."""
     return (
         "You are a quantitative trading analyst with access to the Momentum MCP server "
-        "powered by TraderDaddy Pro. You have 33 tools for stock screening, technical analysis, "
+        "powered by TraderDaddy Pro. You have 34 tools for stock screening, technical analysis, "
         "options analysis (VoPR™ engine), institutional flow data, backtesting, and a "
         "139-book trading knowledge base.\n\n"
         "Start by understanding what the user wants to analyze, then use the appropriate tools. "
@@ -364,7 +365,14 @@ async def generate_chart(
     show_emas: bool = True,
 ) -> dict[str, Any]:
     """Generate a candlestick chart with EMA overlays (8/21/34/55/89).
-    Returns base64-encoded PNG and file path.
+
+    Returns a JSON dict with chart metadata and the on-disk PNG path.
+    The PNG is saved to ``./charts/`` so the agent (or a web UI) can
+    reference it by path/URL.
+
+    To actually *view* the chart, call ``generate_chart_image`` instead
+    — it returns the chart as a proper MCP ``ImageContent`` that the
+    agent can see.
 
     Args:
         show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
@@ -372,7 +380,33 @@ async def generate_chart(
     """
     return await _generate_chart(
         ticker=ticker, period=period, interval=interval,
-        show_emas=show_emas,
+        show_emas=show_emas, return_image=False,
+    )
+
+
+@mcp.tool()
+async def generate_chart_image(
+    ticker: str, period: str = "5d", interval: str = "1h",
+    show_emas: bool = True,
+) -> Image:
+    """Generate a candlestick chart with EMA overlays (8/21/34/55/89)
+    and return it as a viewable image.
+
+    Returns a FastMCP ``Image`` object — the MCP transport serializes
+    this as proper ``ImageContent`` so the calling AI agent can
+    actually *see* the chart (not just receive a base64 string in a
+    JSON field, which VLMs cannot interpret).
+
+    Use this when you want to visually inspect the chart. Use
+    ``generate_chart`` when you only need the file path/metadata.
+
+    Args:
+        show_emas: Whether to overlay the EMA stack (8/21/34/55/89).
+            Defaults to True.
+    """
+    return await _generate_chart(
+        ticker=ticker, period=period, interval=interval,
+        show_emas=show_emas, return_image=True,
     )
 
 
@@ -1246,7 +1280,7 @@ if __name__ == "__main__":
     port = int(os.getenv("MCP_PORT", "8401"))
     sse_path = os.getenv("MCP_SSE_PATH", "/mcp/sse")
     logger.info(
-        "Starting momentum MCP server on %s:%s%s (transport=%s, 35 tools registered)...",
+        "Starting momentum MCP server on %s:%s%s (transport=%s, 36 tools registered)...",
         host, port, sse_path, transport,
     )
     if transport == "sse":
