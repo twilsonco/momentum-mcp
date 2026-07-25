@@ -265,15 +265,31 @@ class _MT5Client:
                 return self._session
             from mcp import ClientSession
             from mcp.client.sse import sse_client
+            import asyncio
 
             logger.info("MT5 MCP: connecting to %s", MT5_MCP_URL)
-            self._cm = sse_client(MT5_MCP_URL)
-            read, write = await self._cm.__aenter__()
-            self._session = ClientSession(read, write)
-            await self._session.__aenter__()
-            await self._session.initialize()
-            logger.info("MT5 MCP: connected and initialized")
-            return self._session
+            try:
+                self._cm = sse_client(MT5_MCP_URL)
+                # Add 10s timeout to connection establishment
+                read, write = await asyncio.wait_for(
+                    self._cm.__aenter__(),
+                    timeout=10.0
+                )
+                self._session = ClientSession(read, write)
+                await asyncio.wait_for(
+                    self._session.__aenter__(),
+                    timeout=10.0
+                )
+                await asyncio.wait_for(
+                    self._session.initialize(),
+                    timeout=10.0
+                )
+                logger.info("MT5 MCP: connected and initialized")
+                return self._session
+            except asyncio.TimeoutError:
+                logger.error("MT5 MCP connection timeout (10s)")
+                self._session = None
+                raise RuntimeError("MT5 MCP connection timeout")
 
     async def _disconnect(self) -> None:
         """Tear down the current connection (if any).
@@ -298,11 +314,23 @@ class _MT5Client:
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
         """Call a tool with one automatic reconnect on failure."""
+        import asyncio
         last_exc: Exception | None = None
         for attempt in range(2):
             try:
                 session = await self._ensure_connected()
-                return await session.call_tool(name, args)
+                # Add timeout to the tool call itself
+                return await asyncio.wait_for(
+                    session.call_tool(name, args),
+                    timeout=15.0  # 15s per tool call
+                )
+            except asyncio.TimeoutError:
+                last_exc = TimeoutError(f"MT5 MCP tool '{name}' timeout (15s)")
+                logger.warning(
+                    "MT5 MCP call '%s' timeout (attempt %d)",
+                    name, attempt + 1,
+                )
+                await self._disconnect()
             except Exception as exc:
                 last_exc = exc
                 logger.warning(

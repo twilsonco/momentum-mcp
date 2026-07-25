@@ -879,16 +879,29 @@ async def calculate_mt5_position_size(
         risk_pct: Percentage of account to risk (default 1%).
         method: "fixed_fractional" (default) or "kelly".
     """
-    res = await _calculate_mt5_position_size(
-        symbol=symbol,
-        stop_price=stop_price,
-        position_direction=position_direction,
-        account_size=account_size,
-        entry_price=entry_price,
-        risk_pct=risk_pct,
-        method=method,
-    )
-    return res.dict()
+    try:
+        res = await _calculate_mt5_position_size(
+            symbol=symbol,
+            stop_price=stop_price,
+            position_direction=position_direction,
+            account_size=account_size,
+            entry_price=entry_price,
+            risk_pct=risk_pct,
+            method=method,
+        )
+        return res.dict()
+    except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f"calculate_mt5_position_size crashed: {e}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # Return error response instead of letting exception kill server
+        return {
+            "status": "error",
+            "data": None,
+            "error": f"MT5 position sizing failed: {str(e)}"
+        }
 
 
 @mcp.tool()
