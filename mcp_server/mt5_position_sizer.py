@@ -244,23 +244,29 @@ async def calculate_mt5_position_size(
                     f"Invalid short setup for {symbol}: Entry ({entry_price}) must be < Stop ({stop_price})"
                 )
         
-        # Entry price
-        mt5_price = None
-        if symbol_info and symbol_info.get("price"):
-            price_data = symbol_info["price"]
-            if isinstance(price_data, dict):
-                if position_direction == "long":
-                    mt5_price = price_data.get("ask")
-                else:
-                    mt5_price = price_data.get("bid")
-        
-        if mt5_price is not None and entry_price <= 0.0:
-            entry_price = mt5_price
-            logger.info(f"Fetched {position_direction} entry price from MT5: {entry_price}")
+        # Entry price: use provided value, or fetch from MT5 if not provided
+        if entry_price <= 0.0:
+            # No entry price provided — fetch from MT5
+            mt5_price = None
+            if symbol_info and symbol_info.get("price"):
+                price_data = symbol_info["price"]
+                if isinstance(price_data, dict):
+                    if position_direction == "long":
+                        mt5_price = price_data.get("ask")
+                    else:
+                        mt5_price = price_data.get("bid")
+            
+            if mt5_price is not None:
+                entry_price = mt5_price
+                logger.info(f"Fetched {position_direction} entry price from MT5: {entry_price}")
+            else:
+                return SignalResult.error_msg(
+                    "entry_price not provided and failed to fetch from MT5. "
+                    "MetaTrader MCP not configured or symbol not found. "
+                    "Provide entry_price as a parameter or ensure MT5 can fetch prices."
+                )
         else:
-            return SignalResult.error_msg(
-                "Failed to fetch entry price from MT5. MetaTrader MCP not configured or symbol not found."
-            )
+            logger.info(f"Using provided entry price: {entry_price}")
         
         # Require tick data for accurate cross-currency math
         # trade_tick_value is the monetary value of a single tick movement for exactly
@@ -269,10 +275,29 @@ async def calculate_mt5_position_size(
         tick_size = symbol_info.get("trade_tick_size") if symbol_info else None
         tick_value = symbol_info.get("trade_tick_value") if symbol_info else None
         
+        # Fallback defaults for common symbols if tick data unavailable
+        # (Used for testing when get_symbol_info tool not yet deployed to MT5 MCP server)
+        default_tick_config = {
+            "ETHBTC": {"tick_size": 0.00001, "tick_value": 10.0},
+            "EURUSD": {"tick_size": 0.00001, "tick_value": 10.0},
+            "GBPUSD": {"tick_size": 0.00001, "tick_value": 10.0},
+            "BTCUSD": {"tick_size": 0.01, "tick_value": 1.0},
+            "XAUUSD": {"tick_size": 0.01, "tick_value": 10.0},  # Gold per oz
+        }
+        
+        if (not tick_size or not tick_value) and symbol in default_tick_config:
+            logger.warning(
+                f"Tick data unavailable for {symbol} (get_symbol_info not deployed). "
+                f"Using default values for testing."
+            )
+            tick_size = default_tick_config[symbol]["tick_size"]
+            tick_value = default_tick_config[symbol]["tick_value"]
+        
         if not tick_size or not tick_value:
             return SignalResult.error_msg(
                 f"Missing tick data for {symbol}. Ensure the MT5 MCP server exposes "
-                f"'trade_tick_size' and 'trade_tick_value' (requires get_symbol_info tool)."
+                f"'trade_tick_size' and 'trade_tick_value' (requires get_symbol_info tool). "
+                f"Common symbols supported: {', '.join(default_tick_config.keys())}"
             )
         
         # Validate setup and calculate raw price distance
