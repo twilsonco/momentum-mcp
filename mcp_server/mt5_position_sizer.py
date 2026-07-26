@@ -60,13 +60,15 @@ async def _fetch_mt5_account_info() -> dict[str, Any] | None:
 
 
 async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
-    """Fetch symbol contract size and pricing from MT5 MCP server.
+    """Fetch symbol info (tick size, tick value, contract size, volume step) and pricing from MT5 MCP server.
     
     Args:
         symbol: MT5 symbol name (e.g., "XAUUSD", "EURUSD").
         
     Returns:
-        Dict with contract_size and price info, or None if unavailable.
+        Dict with full symbol info (trade_tick_size, trade_tick_value, trade_contract_size,
+        volume_min, volume_max, volume_step, digits, point, etc.) and price info,
+        or None if unavailable.
     """
     if not MT5_MCP_URL:
         return None
@@ -74,24 +76,27 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
     try:
         client = _get_mt5_client()
         
-        # Get contract size (3s timeout)
-        contract_size = None
+        # Get full symbol info (tick size, tick value, contract size, volume step, etc.)
+        symbol_info_raw = None
         try:
-            contract_result = await asyncio.wait_for(
+            info_result = await asyncio.wait_for(
                 client.call_tool(
-                    "get_symbol_contract_size",
+                    "get_symbol_info",
                     {"symbol_name": symbol},
                 ),
                 timeout=3.0
             )
-            for content in contract_result.content:
+            for content in info_result.content:
                 if hasattr(content, "text"):
                     try:
-                        contract_size = float(content.text.strip())
-                    except (ValueError, TypeError):
-                        pass
+                        symbol_info_raw = json.loads(content.text.strip())
+                    except json.JSONDecodeError:
+                        # Fallback: try to parse as plain text representation of a dict
+                        text = content.text.strip()
+                        if text:
+                            logger.debug(f"get_symbol_info returned non-JSON for {symbol}: {text[:200]}")
         except asyncio.TimeoutError:
-            logger.warning(f"Timeout fetching contract size for {symbol} from MT5 MCP (3s)")
+            logger.warning(f"Timeout fetching symbol info for {symbol} from MT5 MCP (3s)")
         
         # Get current price (3s timeout)
         price_info = None
@@ -112,11 +117,37 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
         except asyncio.TimeoutError:
             logger.warning(f"Timeout fetching price for {symbol} from MT5 MCP (3s)")
         
-        if contract_size is not None:
-            return {
-                "contract_size": contract_size,
-                "price": price_info,
-            }
+        if symbol_info_raw is not None and isinstance(symbol_info_raw, dict):
+            # Flatten the symbol info into the returned dict for easy access
+            result = dict(symbol_info_raw)
+            result["price"] = price_info
+            return result
+        
+        # Fallback: if get_symbol_info is not available, try get_symbol_contract_size
+        # (older MT5 MCP server versions may not expose get_symbol_info)
+        if symbol_info_raw is None:
+            logger.debug(f"get_symbol_info unavailable for {symbol}, falling back to get_symbol_contract_size")
+            try:
+                contract_result = await asyncio.wait_for(
+                    client.call_tool(
+                        "get_symbol_contract_size",
+                        {"symbol_name": symbol},
+                    ),
+                    timeout=3.0
+                )
+                for content in contract_result.content:
+                    if hasattr(content, "text"):
+                        try:
+                            contract_size = float(content.text.strip())
+                            return {
+                                "trade_contract_size": contract_size,
+                                "price": price_info,
+                            }
+                        except (ValueError, TypeError):
+                            pass
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout fetching contract size for {symbol} from MT5 MCP (3s)")
+        
         return None
     except Exception as e:
         logger.warning(f"Could not fetch symbol info for {symbol} from MT5: {e}")
@@ -126,20 +157,30 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
 async def calculate_mt5_position_size(
     symbol: str,
     position_direction: str,
+    entry_price: float = 0.0,
     stop_price: float = 0.0,
     risk_pct: float = 1.0,
 ) -> SignalResult:
     """Calculate risk-based position size for any MT5-tradeable symbol.
     
     Works with stocks, forex, commodities, indices, cryptocurrencies, or any asset
-    available on MetaTrader5. Fetches real-time account balance, symbol contract size, 
-    and current price from MetaTrader MCP server (if configured). Validates provided 
-    parameters against live MT5 data and reports any discrepancies.
+    available on MetaTrader5 by leveraging native tick values to automatically handle 
+    cross-currency conversions (e.g., ETHBTC to USD).
+    
+    Uses MetaTrader 5's native `trade_tick_value` (the monetary value of a single tick
+    movement for exactly 1.0 standard lot, in the account's base currency) and
+    `trade_tick_size` (the minimum price increment) to compute position size. This
+    inherently accounts for the account's base currency, live cross-rates, and asset
+    class differences.
+    
+    Formula:
+        Position Lots = Risk Amount / ((|Entry - Stop| / Tick Size) * Tick Value)
     
     Args:
         symbol: MT5 symbol (e.g., "XAUUSD", "EURUSD", "AAPL", "BTCUSD", "SPX").
+        entry_price: Entry price (if provided, overrides live fetched price).
         stop_price: Stop loss price (user decision, required).
-        position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop). Default "long".
+        position_direction: "long" a.k.a. "buy" (entry < stop) or "short" a.k.a. "sell" (entry > stop).
         risk_pct: Percentage of account to risk per trade (default 1%).
         
     Returns:
@@ -193,6 +234,16 @@ async def calculate_mt5_position_size(
                     f"Invalid position_direction '{position_direction}'. Must be 'long', 'short', 'buy', or 'sell'."
                 )
         
+        if entry_price > 0.0:
+            if position_direction == "long" and entry_price <= stop_price:
+                return SignalResult.error_msg(
+                    f"Invalid long setup for {symbol}: Entry ({entry_price}) must be > Stop ({stop_price})"
+                )
+            elif position_direction == "short" and entry_price >= stop_price:
+                return SignalResult.error_msg(
+                    f"Invalid short setup for {symbol}: Entry ({entry_price}) must be < Stop ({stop_price})"
+                )
+        
         # Entry price
         mt5_price = None
         if symbol_info and symbol_info.get("price"):
@@ -203,7 +254,7 @@ async def calculate_mt5_position_size(
                 else:
                     mt5_price = price_data.get("bid")
         
-        if mt5_price is not None:
+        if mt5_price is not None and entry_price <= 0.0:
             entry_price = mt5_price
             logger.info(f"Fetched {position_direction} entry price from MT5: {entry_price}")
         else:
@@ -211,57 +262,72 @@ async def calculate_mt5_position_size(
                 "Failed to fetch entry price from MT5. MetaTrader MCP not configured or symbol not found."
             )
         
-        # Contract size
-        contract_size = None
-        if symbol_info and symbol_info.get("contract_size"):
-            contract_size = symbol_info["contract_size"]
+        # Require tick data for accurate cross-currency math
+        # trade_tick_value is the monetary value of a single tick movement for exactly
+        # 1.0 standard lot, expressed in the account's base currency. This inherently
+        # accounts for the account's base currency, live cross-rates, and asset class.
+        tick_size = symbol_info.get("trade_tick_size") if symbol_info else None
+        tick_value = symbol_info.get("trade_tick_value") if symbol_info else None
         
-        # Validate setup
+        if not tick_size or not tick_value:
+            return SignalResult.error_msg(
+                f"Missing tick data for {symbol}. Ensure the MT5 MCP server exposes "
+                f"'trade_tick_size' and 'trade_tick_value' (requires get_symbol_info tool)."
+            )
+        
+        # Validate setup and calculate raw price distance
         if position_direction == "long":
             if entry_price <= stop_price:
                 return SignalResult.error_msg(
                     f"Invalid long setup for {symbol}: Entry ({entry_price}) must be > Stop ({stop_price})"
                 )
-            risk_per_unit = entry_price - stop_price
+            price_distance = entry_price - stop_price
         else:  # short
             if entry_price >= stop_price:
                 return SignalResult.error_msg(
                     f"Invalid short setup for {symbol}: Entry ({entry_price}) must be < Stop ({stop_price})"
                 )
-            risk_per_unit = stop_price - entry_price
+            price_distance = stop_price - entry_price
         
-        if risk_per_unit <= 0:
+        if price_distance <= 0:
             return SignalResult.error_msg(
-                f"Invalid setup: risk_per_unit must be positive, got {risk_per_unit}"
+                f"Invalid setup: price_distance must be positive, got {price_distance}"
             )
         
-        # Calculate position size
+        # --- Tick-Based Risk Calculation ---
+        # 1. Convert price distance to raw ticks
+        distance_in_ticks = price_distance / tick_size
+        
+        # 2. Calculate the exact risk per 1.0 lot in the account's base currency
+        risk_per_lot_account_currency = distance_in_ticks * tick_value
+        
+        if risk_per_lot_account_currency <= 0:
+            return SignalResult.error_msg(
+                f"Invalid calculation: risk per lot is zero or negative ({risk_per_lot_account_currency}). "
+                f"Check tick_size ({tick_size}) and tick_value ({tick_value}) for {symbol}."
+            )
+        
+        # 3. Calculate target position size in lots
         risk_amount = account_size * (risk_pct / 100)
+        position_lots_exact = risk_amount / risk_per_lot_account_currency
         
-        # Position size in units
-        position_units = risk_amount / risk_per_unit
+        # 4. Round to nearest broker step (default 0.01)
+        volume_step = symbol_info.get("volume_step") if symbol_info else None
+        min_lot_size = volume_step if volume_step and volume_step > 0 else 0.01
+        position_lots_rounded = round(position_lots_exact / min_lot_size) * min_lot_size
         
-        # Convert to lots if contract size is available
-        position_lots = position_units / contract_size if contract_size else position_units
-        
-        # Round to nearest minimum lot size (0.01 for MT5) for accuracy
-        # Rounding to nearest gives better risk target accuracy than floor()
-        min_lot_size = 0.01
-        position_lots_rounded = round(position_lots / min_lot_size) * min_lot_size
-        position_units_final = position_lots_rounded * contract_size if contract_size else position_lots_rounded
-        
-        # Actual risk after rounding
-        actual_risk = position_units_final * risk_per_unit
+        # 5. Back-calculate actual risk using the rounded lot size
+        actual_risk = position_lots_rounded * risk_per_lot_account_currency
         actual_risk_pct = (actual_risk / account_size) * 100
         
         # Summary
         summary = (
             f"MT5 Position for {symbol} ({position_direction.upper()}):\n"
             f"- Entry: {entry_price:.5f}, Stop: {stop_price:.5f}\n"
-            f"- Risk per unit: {risk_per_unit:.5f}\n"
+            f"- Distance in Ticks: {distance_in_ticks:.2f}\n"
             f"- Account: ${account_size:,.2f}\n"
             f"- Requested Risk: ${risk_amount:,.2f} ({risk_pct}%)\n"
-            f"- Position: {position_lots_rounded:.2f} lots ({position_units_final:.2f} units)\n"
+            f"- Position: {position_lots_rounded:.2f} lots\n"
             f"- Actual Risk: ${actual_risk:,.2f} ({actual_risk_pct:.2f}%)"
         )
         
@@ -270,15 +336,17 @@ async def calculate_mt5_position_size(
             "position_direction": position_direction,
             "entry_price": round(entry_price, 5),
             "stop_price": round(stop_price, 5),
-            "risk_per_unit": round(risk_per_unit, 5),
             "account_size": round(account_size, 2),
             "risk_pct": risk_pct,
             "risk_amount": round(risk_amount, 2),
             "position_lots": round(position_lots_rounded, 2),
-            "position_units": round(position_units_final, 2),
             "actual_risk": round(actual_risk, 2),
             "actual_risk_pct": round(actual_risk_pct, 2),
-            "contract_size": round(contract_size, 4) if contract_size else None,
+            "tick_size": tick_size,
+            "tick_value": tick_value,
+            "distance_in_ticks": round(distance_in_ticks, 2),
+            "risk_per_lot_account_currency": round(risk_per_lot_account_currency, 4),
+            "volume_step": min_lot_size,
             "summary": summary,
         }
         

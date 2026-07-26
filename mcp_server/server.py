@@ -996,6 +996,7 @@ async def calculate_position_size(
 async def calculate_mt5_position_size(
     symbol: str,
     position_direction: str,
+    entry_price: float = 0.0,
     stop_price: float = 0.0,
     risk_pct: float = 1.0,
 ) -> dict[str, Any]:
@@ -1036,6 +1037,7 @@ async def calculate_mt5_position_size(
             _calculate_mt5_position_size(
                 symbol=symbol,
                 position_direction=position_direction,
+                entry_price=entry_price,
                 stop_price=stop_price,
                 risk_pct=risk_pct,
             ),
