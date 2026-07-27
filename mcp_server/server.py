@@ -111,6 +111,7 @@ from mcp_server.bubble import detect_bubble_risk as _detect_bubble_risk
 
 from mcp_server.alpha_cards import generate_alpha_card as _generate_alpha_card
 from mcp_server.warmer import get_alpha_signals as _get_alpha_signals, WARM_TICKERS
+from mcp_server.market_picker import pick_market as _pick_market
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -279,6 +280,31 @@ async def get_historical_data(
     
     # Explicitly disconnect MT5 client after getting data to prevent
     # Python 3.14 anyio cancel scope error during FastMCP response serialization
+    try:
+        client = _get_mt5_client()
+        await client._disconnect()
+    except Exception:
+        pass  # Ignore cleanup errors
+    
+    return result
+
+
+@mcp.tool()
+async def pick_market() -> dict[str, Any]:
+    """Pick a random market to trade based on open hours and open positions.
+    
+    Automatically excludes symbols that already have open MetaTrader positions.
+    Validates each picked symbol using get_symbol_info before returning.
+    
+    Will abort if:
+    - Already have 10+ open positions
+    - No valid symbols available or all are already traded
+    """
+    from mcp_server.data import _get_mt5_client
+    
+    result = await _pick_market(max_positions=10)
+    
+    # Explicitly disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
     try:
         client = _get_mt5_client()
         await client._disconnect()
