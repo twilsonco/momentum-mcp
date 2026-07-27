@@ -53,7 +53,7 @@ from mcp_server.screener import run_stock_screen as _run_stock_screen
 from mcp_server.screener import run_custom_screen as _run_custom_screen
 from mcp_server.data import get_historical_data as _get_historical_data
 from mcp_server.technicals import analyze_technicals as _analyze_technicals
-from mcp_server.charts import generate_chart as _generate_chart, ChartResult
+from mcp_server.charts import generate_chart as _generate_chart
 from mcp_server.news import (
     fetch_ticker_news as _fetch_ticker_news,
     extract_article_text as _extract_article_text,
@@ -361,13 +361,15 @@ async def get_tv_analysis(
 
 @mcp.tool()
 async def generate_chart(
-    ticker: str, period: str = "5d", interval: str = "1h",
+    ticker: str, 
+    period: str = "5d", 
+    interval: str = "1h",
     show_emas: bool = True,
     show_volume: bool = False,
     entry_price: float | None = None,
     stop_loss_price: float | None = None,
     take_profit_price: float | None = None,
-) -> ChartResult:
+) -> dict[str, Any]:
     """Generate a candlestick chart with EMA overlays (8/21/34/55/89).
 
     Returns a JSON dict with chart metadata and the on-disk PNG path.
@@ -394,7 +396,9 @@ async def generate_chart(
         take_profit_price: Optional take profit price. Drawn as a
             dashed green horizontal line. Requires ``entry_price``.
     """
-    return await _generate_chart(
+    from mcp_server.data import _get_mt5_client
+    
+    result = await _generate_chart(
         ticker=ticker, period=period, interval=interval,
         show_emas=show_emas,
         show_volume=show_volume,
@@ -403,11 +407,23 @@ async def generate_chart(
         take_profit_price=take_profit_price,
         return_image=False,
     )
+    
+    # Explicitly disconnect MT5 client after generating chart to prevent
+    # Python 3.14 anyio cancel scope error during FastMCP response serialization
+    try:
+        client = _get_mt5_client()
+        await client._disconnect()
+    except Exception:
+        pass  # Ignore cleanup errors
+    
+    return result
 
 
 @mcp.tool()
 async def generate_chart_image(
-    ticker: str, period: str = "5d", interval: str = "1h",
+    ticker: str, 
+    period: str = "5d", 
+    interval: str = "1h",
     show_emas: bool = True,
     show_volume: bool = False,
     entry_price: float | None = None,
@@ -441,7 +457,9 @@ async def generate_chart_image(
         take_profit_price: Optional take profit price. Drawn as a
             dashed green horizontal line. Requires ``entry_price``.
     """
-    return await _generate_chart(
+    from mcp_server.data import _get_mt5_client
+    
+    result = await _generate_chart(
         ticker=ticker, period=period, interval=interval,
         show_emas=show_emas,
         show_volume=show_volume,
@@ -450,6 +468,16 @@ async def generate_chart_image(
         take_profit_price=take_profit_price,
         return_image=True,
     )
+    
+    # Explicitly disconnect MT5 client after generating chart to prevent
+    # Python 3.14 anyio cancel scope error during FastMCP response serialization
+    try:
+        client = _get_mt5_client()
+        await client._disconnect()
+    except Exception:
+        pass  # Ignore cleanup errors
+    
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -12,7 +12,7 @@ import base64
 import io
 import logging
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 import matplotlib
 matplotlib.use("Agg")  # Headless rendering — must be set before importing pyplot
@@ -36,8 +36,13 @@ class TradeLevels(TypedDict, total=False):
     reward: float | None
 
 
-class ChartResult(TypedDict, total=False):
-    """Return shape for ``generate_chart`` when ``return_image=False``."""
+class ChartResult(TypedDict):
+    """Return shape for ``generate_chart`` when ``return_image=False``.
+    
+    All fields except 'trade' are always present. The 'trade' field is only
+    included when trade position parameters (entry_price, stop_loss_price,
+    take_profit_price) are provided to the chart generation function.
+    """
 
     ticker: str
     period: str
@@ -45,7 +50,7 @@ class ChartResult(TypedDict, total=False):
     bars: int
     emas: list[int]
     path: str
-    trade: TradeLevels
+    trade: NotRequired[TradeLevels]
 
 
 logger = logging.getLogger(__name__)
@@ -178,6 +183,13 @@ async def generate_chart(
         raise ValueError(
             "entry_price is required when stop_loss_price or take_profit_price is provided."
         )
+    
+    if (stop_loss_price and stop_loss_price <= 0):
+        raise ValueError("stop_loss_price must be positive.")
+    if (take_profit_price and take_profit_price <= 0):
+        raise ValueError("take_profit_price must be positive.")
+    if (entry_price and entry_price <= 0):
+        raise ValueError("entry_price must be positive.")
 
     # Compute trade levels (price, color, linestyle, label)
     trade_levels: list[tuple[float, str, str, str]] = []
