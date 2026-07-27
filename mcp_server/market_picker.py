@@ -157,7 +157,7 @@ async def _validate_symbol(symbol: str) -> bool:
         client = _get_mt5_client()
         result = await asyncio.wait_for(
             client.call_tool(
-                "get_symbol_info",
+                "get_symbol_price",
                 {"symbol_name": symbol},
             ),
             timeout=3.0,
