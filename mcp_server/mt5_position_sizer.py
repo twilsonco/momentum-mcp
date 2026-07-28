@@ -98,55 +98,8 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
         except asyncio.TimeoutError:
             logger.warning(f"Timeout fetching symbol info for {symbol} from MT5 MCP (3s)")
         
-        # Get current price (3s timeout)
-        price_info = None
-        try:
-            price_result = await asyncio.wait_for(
-                client.call_tool(
-                    "get_symbol_price",
-                    {"symbol_name": symbol},
-                ),
-                timeout=3.0
-            )
-            for content in price_result.content:
-                if hasattr(content, "text"):
-                    try:
-                        price_info = json.loads(content.text.strip())
-                    except json.JSONDecodeError:
-                        pass
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout fetching price for {symbol} from MT5 MCP (3s)")
-        
         if symbol_info_raw is not None and isinstance(symbol_info_raw, dict):
-            # Flatten the symbol info into the returned dict for easy access
-            result = dict(symbol_info_raw)
-            result["price"] = price_info
-            return result
-        
-        # Fallback: if get_symbol_info is not available, try get_symbol_contract_size
-        # (older MT5 MCP server versions may not expose get_symbol_info)
-        if symbol_info_raw is None:
-            logger.debug(f"get_symbol_info unavailable for {symbol}, falling back to get_symbol_contract_size")
-            try:
-                contract_result = await asyncio.wait_for(
-                    client.call_tool(
-                        "get_symbol_contract_size",
-                        {"symbol_name": symbol},
-                    ),
-                    timeout=3.0
-                )
-                for content in contract_result.content:
-                    if hasattr(content, "text"):
-                        try:
-                            contract_size = float(content.text.strip())
-                            return {
-                                "trade_contract_size": contract_size,
-                                "price": price_info,
-                            }
-                        except (ValueError, TypeError):
-                            pass
-            except asyncio.TimeoutError:
-                logger.warning(f"Timeout fetching contract size for {symbol} from MT5 MCP (3s)")
+            return symbol_info_raw
         
         return None
     except Exception as e:
@@ -248,13 +201,11 @@ async def calculate_mt5_position_size(
         if entry_price <= 0.0:
             # No entry price provided — fetch from MT5
             mt5_price = None
-            if symbol_info and symbol_info.get("price"):
-                price_data = symbol_info["price"]
-                if isinstance(price_data, dict):
+            if symbol_info and isinstance(symbol_info, dict):
                     if position_direction == "long":
-                        mt5_price = price_data.get("ask")
+                        mt5_price = symbol_info.get("ask")
                     else:
-                        mt5_price = price_data.get("bid")
+                        mt5_price = symbol_info.get("bid")
             
             if mt5_price is not None:
                 entry_price = mt5_price
