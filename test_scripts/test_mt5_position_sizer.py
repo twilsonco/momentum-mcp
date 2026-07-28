@@ -13,10 +13,11 @@ import json
 import sys
 import logging
 from os import getenv
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Add mcp_server to path
-sys.path.insert(0, "/Users/haiiro/NoSync/momentum-mcp")
+# Add the project root to sys.path so we can import mcp_server regardless of cwd
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 load_dotenv()
 
@@ -33,6 +34,59 @@ from mcp_server.data import MT5_MCP_URL
 
 # Suppress verbose httpx logging
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Suppress harmless Python 3.14 + anyio cleanup errors from mcp.client.sse.
+#
+# When the MT5 SSE connection fails or is torn down, the underlying
+# ``sse_client`` async generator can raise ``RuntimeError`` during finalization
+# because its cancel scope is exited from a different task than the one that
+# entered it.  These errors are emitted *after* the event loop is closed, so
+# they cannot be caught normally.  Filter them out at the interpreter and
+# asyncio layers.
+# ─────────────────────────────────────────────────────────────────────────────
+_HARMLESS = (
+    "Attempted to exit cancel scope in a different task",
+    "generator didn't stop after athrow",
+    "unhandled errors in a TaskGroup",
+)
+
+
+def _is_harmless(exc: BaseException) -> bool:
+    return any(msg in str(exc) for msg in _HARMLESS)
+
+
+def _install_exception_hooks() -> None:
+    """Install hooks that swallow the harmless anyio/MCP shutdown errors."""
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        if exc_value is not None and _is_harmless(exc_value):
+            return
+        if exc_type is ExceptionGroup or exc_type is BaseExceptionGroup:
+            if _is_harmless(exc_value):
+                return
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _excepthook
+    if hasattr(sys, "unraisablehook"):
+        def _unraisablehook(unraisable):
+            if unraisable.exc_value is not None and _is_harmless(unraisable.exc_value):
+                return
+            sys.__unraisablehook__(unraisable)
+        sys.unraisablehook = _unraisablehook
+
+    def _loop_handler(loop, context):
+        exc = context.get("exception")
+        if exc is not None and _is_harmless(exc):
+            return
+        loop.default_exception_handler(context)
+
+    try:
+        asyncio.get_event_loop().set_exception_handler(_loop_handler)
+    except RuntimeError:
+        # No running loop yet — will be installed in main()
+        pass
 
 
 
@@ -100,7 +154,15 @@ async def main():
     logger.info("\n🔍 MT5 Position Sizer - Entry Price Fix Tests")
     logger.info(f"MT5_MCP_URL: {MT5_MCP_URL}")
     logger.info(f"Testing: entry_price parameter is respected\n")
-    
+
+    # Install the asyncio loop handler now that a loop exists
+    def _loop_handler(loop, context):
+        exc = context.get("exception")
+        if exc is not None and _is_harmless(exc):
+            return
+        loop.default_exception_handler(context)
+    asyncio.get_running_loop().set_exception_handler(_loop_handler)
+
     if not MT5_MCP_URL:
         logger.error("❌ MT5_MCP_URL not configured!")
         sys.exit(1)
@@ -135,7 +197,6 @@ async def main():
     print("")
     if all_pass:
         logger.info("✅ All tests passed! Entry price fix is working correctly.")
-        sys.exit(0)
     else:
         logger.error("❌ Some tests failed!")
         logger.info("\nDiagnostics:")
@@ -143,17 +204,31 @@ async def main():
         logger.info("  • Verify MT5 MCP server is running")
         logger.info("  • Check account has sufficient balance")
         logger.info("  • Ensure ETHBTC symbol exists and is tradeable")
-        sys.exit(1)
+
+    # Explicitly close the MT5 singleton so its sse_client generator is
+    # finalized *inside* the running loop, avoiding shutdown-time cleanup
+    # errors from anyio cancel-scope mismatches.
+    try:
+        from mcp_server.data import _get_mt5_client
+        await _get_mt5_client().aclose()
+    except Exception:
+        pass
+
+    return 0 if all_pass else 1
 
 
 if __name__ == "__main__":
+    _install_exception_hooks()
     try:
-        asyncio.run(main())
+        exit_code = asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("\n⚠️  Test interrupted by user")
         sys.exit(1)
+    except SystemExit:
+        raise
     except Exception as e:
         logger.error(f"\n❌ Unexpected error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
+    sys.exit(exit_code)
