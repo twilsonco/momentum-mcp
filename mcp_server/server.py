@@ -125,23 +125,11 @@ logger = logging.getLogger(__name__)
 mcp = FastMCP(
     "momentum",
     instructions=(
-        "Welcome to the Momentum MCP Server — powered by TraderDaddy Pro.\n\n"
-        "This server provides 34 quantitative trading tools for AI agents:\n"
-        "• Stock screening (22 presets + custom filters)\n"
-        "• Technical analysis (24 indicators: EMA stack, RSI, MACD, ADX, ATR, Bollinger, etc.)\n"
-        "• Options analysis via VoPR™ engine (vol surface, Black-Scholes, A-F grading)\n"
-        "• Auto-find best options to sell/buy/straddle\n"
-        "• Institutional flow data, GEX, sector rotation, politician trades\n"
-        "• Backtesting suite (6 presets, walk-forward validation, multi-ticker sweep)\n"
-        "• 139-book trading knowledge base (RAG search)\n\n"
-        "Data sources: yfinance, TradingView, TraderDaddy Pro REST API, ChromaDB.\n"
-        "Rate limited to 30 requests/minute per IP. Results are cached with "
-        "market-hours-aware TTL (shorter during market open for freshness).\n\n"
-        "Learn more at https://traderdaddy.pro\n\n"
         "Common Args for all tools that accept ``ticker``, ``period``, and ``interval``:\n"
         "  - ticker: Stock ticker symbol (e.g. AAPL, EURUSD, XAUUSD).\n"
         "  - period: Lookback period. One of: 1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max.\n"
-        "  - interval: Bar interval. One of: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo."
+        "  - interval: Bar interval. One of: 1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo.\n"
+        "Always omit unused optional parameters in tool calls. Do not send None for optionals you don't need — the schema defaults handle them."
     ),
 )
 
