@@ -13,11 +13,11 @@ import sys
 from pathlib import Path
 
 # Server config matching the Hermes config
-SERVER_PYTHON = Path(__file__).parent / ".venv/bin/python"
+SERVER_PYTHON = Path(__file__).parent.parent / ".venv/bin/python"
 SERVER_MODULE = "mcp_server.server"
 SERVER_ENV = {
     "MCP_TRANSPORT": "stdio",
-    "PYTHONPATH": str(Path(__file__).parent),
+    "PYTHONPATH": str(Path(__file__).parent.parent),
     "MT5_MCP_URL": "http://10.0.1.105:8080/sse",
 }
 
