@@ -362,29 +362,63 @@ class _MT5Client:
     async def _disconnect(self) -> None:
         """Tear down the current connection (if any).
 
-        Suppresses cleanup errors — the SSE client uses anyio task groups
-        which can raise ``RuntimeError`` on Python 3.14+ when the cancel
-        scope is exited from a different task than it was entered.  These
-        are harmless cleanup artifacts.
+        Robust against:
+        - Python 3.14+ anyio cancel scope mismatches (exit from a different
+          task than the one that entered) — these are harmless cleanup
+          artifacts from the SSE client's internal task groups.
+        - ``__aexit__`` hangs — each cleanup step has a 2s timeout.
+        - Already-disconnected state — no-op if ``_session``/``_cm`` are None.
+        - Closed event loop — caught and logged.
+
+        Always resets ``_session`` and ``_cm`` to ``None`` so the next call
+        reconnects from scratch.
         """
-        if self._session is not None:
+        # Snapshot state so we can reset atomically even if cleanup raises
+        session = self._session
+        cm = self._cm
+        self._session = None
+        self._cm = None
+
+        # 1. Tear down the ClientSession first (inner scope)
+        if session is not None:
             try:
-                await self._session.__aexit__(None, None, None)
-            except BaseException:
-                pass
-            self._session = None
-        if self._cm is not None:
+                await asyncio.wait_for(
+                    session.__aexit__(None, None, None),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("MT5 MCP: session.__aexit__ timed out (2s)")
+            except RuntimeError as e:
+                # Python 3.14+ anyio cancel scope mismatch — harmless cleanup
+                if "cancel scope" in str(e):
+                    logger.debug("MT5 MCP: suppressed cancel scope error during session cleanup")
+                else:
+                    logger.warning("MT5 MCP: session cleanup RuntimeError: %s", e)
+            except Exception as e:
+                logger.warning("MT5 MCP: session cleanup error: %s", e)
+
+        # 2. Tear down the sse_client context manager (outer scope)
+        if cm is not None:
             try:
-                await self._cm.__aexit__(None, None, None)
-            except BaseException:
-                pass
-            self._cm = None
+                await asyncio.wait_for(
+                    cm.__aexit__(None, None, None),
+                    timeout=2.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("MT5 MCP: sse_client.__aexit__ timed out (2s)")
+            except RuntimeError as e:
+                if "cancel scope" in str(e):
+                    logger.debug("MT5 MCP: suppressed cancel scope error during sse_client cleanup")
+                else:
+                    logger.warning("MT5 MCP: sse_client cleanup RuntimeError: %s", e)
+            except Exception as e:
+                logger.warning("MT5 MCP: sse_client cleanup error: %s", e)
 
     async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
         """Call a tool with one automatic reconnect on failure.
-        
-        NOTE: Suppresses Python 3.14 anyio cleanup errors to prevent
-        FastMCP stdio transport from hanging.
+
+        ``_disconnect()`` is fully robust (timeouts, cancel-scope suppression,
+        atomic state reset) so we don't need a try/except wrapper here.
         """
         import asyncio
         last_exc: Exception | None = None
@@ -403,28 +437,16 @@ class _MT5Client:
                     "MT5 MCP call '%s' timeout (attempt %d)",
                     name, attempt + 1,
                 )
-                # Disconnect on failure, suppressing cleanup errors
-                try:
-                    await self._disconnect()
-                except RuntimeError as e:
-                    if "cancel scope" not in str(e):
-                        raise
-                    # Suppress Python 3.14 anyio cleanup errors
-                    pass
+                # Disconnect on failure — _disconnect() handles its own errors
+                await self._disconnect()
             except Exception as exc:
                 last_exc = exc
                 logger.warning(
                     "MT5 MCP call '%s' failed (attempt %d): %s",
                     name, attempt + 1, exc,
                 )
-                # Disconnect on failure, suppressing cleanup errors
-                try:
-                    await self._disconnect()
-                except RuntimeError as e:
-                    if "cancel scope" not in str(e):
-                        raise
-                    # Suppress Python 3.14 anyio cleanup errors
-                    pass
+                # Disconnect on failure — _disconnect() handles its own errors
+                await self._disconnect()
         assert last_exc is not None
         raise last_exc
 

@@ -333,17 +333,28 @@ async def analyze_technicals(
     Williams %R, Stochastic, Bollinger Bands, CCI(20). Latest readings + analysis summary.
     """
     from mcp_server.data import _get_mt5_client
-    
-    res = await _analyze_technicals(ticker=ticker, period=period, interval=interval)
-    
-    # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+
     try:
-        client = _get_mt5_client()
-        await client._disconnect()
-    except Exception:
-        pass
-    
-    return res.dict()
+        res = await _analyze_technicals(ticker=ticker, period=period, interval=interval)
+        return res.dict()
+    except Exception as e:
+        logger.error("analyze_technicals failed for %s: %s", ticker, e)
+        logger.error("Traceback: %s", traceback.format_exc())
+        return {
+            "status": "error",
+            "ticker": ticker,
+            "error": f"Technical analysis failed: {type(e).__name__}: {e}",
+        }
+    finally:
+        # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
+        try:
+            client = _get_mt5_client()
+            await client._disconnect()
+        except Exception:
+            pass
 
 
 @mcp.tool()
@@ -423,26 +434,38 @@ async def generate_chart(
             dashed green horizontal line. Requires ``entry_price``.
     """
     from mcp_server.data import _get_mt5_client
-    
-    result = await _generate_chart(
-        ticker=ticker, period=period, interval=interval,
-        show_emas=show_emas,
-        show_volume=show_volume,
-        entry_price=entry_price,
-        stop_loss_price=stop_loss_price,
-        take_profit_price=take_profit_price,
-        return_image=False,
-    )
-    
-    # Explicitly disconnect MT5 client after generating chart to prevent
-    # Python 3.14 anyio cancel scope error during FastMCP response serialization
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+
     try:
-        client = _get_mt5_client()
-        await client._disconnect()
-    except Exception:
-        pass  # Ignore cleanup errors
-    
-    return result
+        result = await _generate_chart(
+            ticker=ticker, period=period, interval=interval,
+            show_emas=show_emas,
+            show_volume=show_volume,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            return_image=False,
+        )
+        return result
+    except Exception as e:
+        # Log full traceback for debugging, return structured error
+        logger.error("generate_chart failed for %s: %s", ticker, e)
+        logger.error("Traceback: %s", traceback.format_exc())
+        return {
+            "status": "error",
+            "ticker": ticker,
+            "error": f"Chart generation failed: {type(e).__name__}: {e}",
+        }
+    finally:
+        # Explicitly disconnect MT5 client after generating chart to prevent
+        # Python 3.14 anyio cancel scope error during FastMCP response serialization
+        try:
+            client = _get_mt5_client()
+            await client._disconnect()
+        except Exception:
+            pass  # Ignore cleanup errors
 
 
 @mcp.tool()
@@ -484,26 +507,38 @@ async def generate_chart_image(
             dashed green horizontal line. Requires ``entry_price``.
     """
     from mcp_server.data import _get_mt5_client
-    
-    result = await _generate_chart(
-        ticker=ticker, period=period, interval=interval,
-        show_emas=show_emas,
-        show_volume=show_volume,
-        entry_price=entry_price,
-        stop_loss_price=stop_loss_price,
-        take_profit_price=take_profit_price,
-        return_image=True,
-    )
-    
-    # Explicitly disconnect MT5 client after generating chart to prevent
-    # Python 3.14 anyio cancel scope error during FastMCP response serialization
+    import logging
+    import traceback
+    logger = logging.getLogger(__name__)
+
     try:
-        client = _get_mt5_client()
-        await client._disconnect()
-    except Exception:
-        pass  # Ignore cleanup errors
-    
-    return result
+        result = await _generate_chart(
+            ticker=ticker, period=period, interval=interval,
+            show_emas=show_emas,
+            show_volume=show_volume,
+            entry_price=entry_price,
+            stop_loss_price=stop_loss_price,
+            take_profit_price=take_profit_price,
+            return_image=True,
+        )
+        return result
+    except Exception as e:
+        # Log full traceback for debugging, raise a clear error
+        logger.error("generate_chart_image failed for %s: %s", ticker, e)
+        logger.error("Traceback: %s", traceback.format_exc())
+        # Re-raise as ValueError so FastMCP returns a proper error response
+        # (Image return type can't carry an error dict)
+        raise ValueError(
+            f"Chart generation failed for '{ticker}': {type(e).__name__}: {e}"
+        ) from e
+    finally:
+        # Explicitly disconnect MT5 client after generating chart to prevent
+        # Python 3.14 anyio cancel scope error during FastMCP response serialization
+        try:
+            client = _get_mt5_client()
+            await client._disconnect()
+        except Exception:
+            pass  # Ignore cleanup errors
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1025,25 +1060,36 @@ async def calculate_position_size(
         max_position_pct: Maximum position size as % of account (default 10%).
         method: "fixed_fractional" (default), "atr", or "kelly".
     """
-    res = await _calculate_position_size(
-        ticker=ticker,
-        account_size=account_size,
-        risk_pct=risk_pct,
-        entry_price=entry_price,
-        stop_price=stop_price,
-        max_position_pct=max_position_pct,
-        method=method,
-    )
-    
-    # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
-    from mcp_server.data import _get_mt5_client
     try:
-        client = _get_mt5_client()
-        await client._disconnect()
-    except Exception:
-        pass
-    
-    return res.dict()
+        res = await _calculate_position_size(
+            ticker=ticker,
+            account_size=account_size,
+            risk_pct=risk_pct,
+            entry_price=entry_price,
+            stop_price=stop_price,
+            max_position_pct=max_position_pct,
+            method=method,
+        )
+        return res.dict()
+    except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error("calculate_position_size failed for %s: %s", ticker, e)
+        logger.error("Traceback: %s", traceback.format_exc())
+        return {
+            "status": "error",
+            "ticker": ticker,
+            "error": f"Position sizing failed: {type(e).__name__}: {e}",
+        }
+    finally:
+        # Disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
+        from mcp_server.data import _get_mt5_client
+        try:
+            client = _get_mt5_client()
+            await client._disconnect()
+        except Exception:
+            pass
 
 
 @mcp.tool()

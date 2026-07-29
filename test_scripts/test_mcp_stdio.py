@@ -13,11 +13,13 @@ import sys
 from pathlib import Path
 
 # Server config matching the Hermes config
-SERVER_PYTHON = Path(__file__).parent.parent / ".venv/bin/python"
+# The venv lives at the project root, not in test_scripts/
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SERVER_PYTHON = PROJECT_ROOT / ".venv/bin/python"
 SERVER_MODULE = "mcp_server.server"
 SERVER_ENV = {
     "MCP_TRANSPORT": "stdio",
-    "PYTHONPATH": str(Path(__file__).parent.parent),
+    "PYTHONPATH": str(PROJECT_ROOT),
     "MT5_MCP_URL": "http://10.0.1.105:8080/sse",
 }
 
@@ -203,7 +205,10 @@ async def test_other_tools():
         )
         
         print("✓ Test passed!")
-        print(f"Result keys: {list(result.get('result', {}).get('content', [{}])[0].get('text', {}).keys())}")
+        # The 'text' field is a JSON string, not a dict — parse it first
+        text = result.get('result', {}).get('content', [{}])[0].get('text', '{}')
+        parsed = json.loads(text) if isinstance(text, str) else text
+        print(f"Result keys: {list(parsed.keys()) if isinstance(parsed, dict) else type(parsed).__name__}")
         
     except asyncio.TimeoutError:
         print("✗ Test FAILED: Timeout after 30 seconds")

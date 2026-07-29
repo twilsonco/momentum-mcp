@@ -173,6 +173,16 @@ async def generate_chart(
     # Fetch data
     records = await get_historical_data(ticker, period=period, interval=interval)
 
+    # Disconnect MT5 client after data fetch to prevent Python 3.14
+    # anyio cancel scope errors during FastMCP response serialization.
+    # Defense-in-depth: also done in server.py tool wrapper, but doing it
+    # here ensures the connection is released as soon as data is in hand.
+    try:
+        from mcp_server.data import _get_mt5_client
+        await _get_mt5_client()._disconnect()
+    except Exception:
+        pass  # Ignore cleanup errors — client may not be connected
+
     if len(records) < 5:
         raise ValueError(
             f"Not enough data to chart '{ticker}': got {len(records)} bars."
