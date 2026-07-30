@@ -55,18 +55,22 @@ INTERVALS = ["M15", "M30", "H1", "H4", "D1"]
 
 def _get_historical_timeframe(interval: str) -> str:
     """Map interval to recommended historical data timeframe."""
-    if interval in ["M1", "M5", "M15", "M30"]:
+    if interval in ["M1", "M5"]:
         return "1 day"
-    elif interval == "H1":
+    elif interval in ["M15", "M30"]:
         return "5 days"
-    elif interval == "H4":
+    elif interval == "H1":
         return "1 month"
-    elif interval == "D1":
+    elif interval == "H4":
         return "3 months"
-    elif interval in ["D5", "W1"]:
+    elif interval == "D1":
         return "6 months"
-    elif interval == "MN":
+    elif interval == "D5":
         return "2 years"
+    elif interval == "W1":
+        return "5 years"
+    elif interval == "MN":
+        return "max"
     return "1 month"
 
 
@@ -141,6 +145,59 @@ async def _get_open_position_symbols() -> set[str]:
         return set()
 
 
+async def _get_margin_level() -> float | None:
+    """Fetch the account margin level percentage from MetaTrader.
+
+    Returns:
+        Margin level as a percentage (equity / margin * 100), or None if
+        MT5 MCP is unavailable or the value cannot be parsed.
+    """
+    if not MT5_MCP_URL:
+        logger.debug("MT5_MCP_URL not configured, cannot fetch margin level")
+        return None
+
+    try:
+        from mcp_server.mt5_position_sizer import _get_mt5_client
+
+        client = _get_mt5_client()
+        result = await asyncio.wait_for(
+            client.call_tool("get_account_info", {}),
+            timeout=5.0,
+        )
+
+        for content in result.content:
+            if hasattr(content, "text"):
+                text = content.text.strip()
+                try:
+                    account_info = json.loads(text)
+                except json.JSONDecodeError:
+                    logger.warning(f"Could not parse account info: {text}")
+                    continue
+
+                if not isinstance(account_info, dict):
+                    continue
+
+                margin_level = account_info.get("margin_level")
+                if margin_level is None:
+                    logger.debug(f"Account info missing margin_level: {account_info}")
+                    return None
+
+                try:
+                    return float(margin_level)
+                except (TypeError, ValueError):
+                    logger.warning(f"Invalid margin_level value: {margin_level!r}")
+                    return None
+
+        return None
+
+    except asyncio.TimeoutError:
+        logger.warning("Timeout fetching account info from MT5 MCP (5s)")
+        return None
+    except Exception as exc:
+        logger.warning(f"Failed to fetch margin level: {exc}")
+        return None
+
+
 async def _validate_symbol(symbol: str) -> bool:
     """Validate that a symbol can be traded by calling get_symbol_info.
     
@@ -181,9 +238,12 @@ async def _validate_symbol(symbol: str) -> bool:
         return False
 
 
-async def pick_market(max_positions: int = 10) -> dict[str, Any]:
+async def pick_market(
+    max_positions: int = 10,
+    minimum_margin_percent: float = 500.0,
+) -> dict[str, Any]:
     """Pick a random market symbol that doesn't have an open position.
-    
+
     This function:
     1. Checks if max_positions limit is reached (returns error if ≥ max_positions)
     2. Fetches all open MetaTrader positions and excludes their symbols
@@ -191,12 +251,17 @@ async def pick_market(max_positions: int = 10) -> dict[str, Any]:
     4. Randomly picks a symbol and validates it with get_symbol_info
     5. If validation fails, removes the symbol and tries again
     6. Returns the picked symbol with interval and recommended timeframe
-    
+
     Args:
         max_positions: Maximum allowed open positions. Defaults to 10.
                       If current positions ≥ max_positions, returns error.
                       NOTE: This argument is NOT exposed to the MCP tool.
-    
+        minimum_margin_percent: Minimum acceptable account margin level (equity /
+                      margin * 100). If the current margin level is less than or
+                      or equal to this threshold, the function aborts. Defaults to
+                      500.0 (the updated standard MT5 margin call level). Set to 0.0 to
+                      disable the check.
+
     Returns:
         Dict with keys:
         - symbol: The picked market symbol
@@ -204,30 +269,52 @@ async def pick_market(max_positions: int = 10) -> dict[str, Any]:
         - historical_data_timeframe: Recommended timeframe for historical data
         - current_time_utc: Current UTC time (ISO-8601)
         - current_time_local: Current local time (ISO-8601)
-        
+
         Or error dict if:
         - Maximum positions reached
+        - Margin level below the minimum threshold
         - No valid symbols available
     """
     if not MT5_MCP_URL:
         msg = "MetaTrader MCP server not configured; Abort immediately"
         logger.error(msg)
         return {"error": msg}
-    
+
     now_utc = datetime.now(timezone.utc)
-    
+
     # Step 1: Get open position symbols
     open_symbols = await _get_open_position_symbols()
     num_positions = len(open_symbols)
     allowed_additional_positions = max_positions - num_positions
-    
+
     logger.info(f"Current open positions: {num_positions}, max_positions: {max_positions}")
-    
+
     # Step 2: Check max_positions limit
     if num_positions >= max_positions:
         msg = f"Maximum positions ({max_positions}) reached; Abort immediately"
         logger.info(msg)
         return {"error": msg}
+
+    # Step 2b: Check account margin level
+    if minimum_margin_percent > 0:
+        margin_level = await _get_margin_level()
+        if margin_level is not None:
+            logger.info(
+                f"Account margin level: {margin_level:.2f}%, "
+                f"minimum required: {minimum_margin_percent:.2f}%"
+            )
+            if margin_level <= minimum_margin_percent:
+                msg = (
+                    f"Account margin level ({margin_level:.2f}%) is at or below "
+                    f"minimum threshold ({minimum_margin_percent:.2f}%); "
+                    f"Abort immediately"
+                )
+                logger.info(msg)
+                return {"error": msg}
+        else:
+            logger.warning(
+                "Could not fetch margin level; proceeding without margin check"
+            )
     
     # Step 3: Build available symbols list (only from open markets)
     available_symbols = []
