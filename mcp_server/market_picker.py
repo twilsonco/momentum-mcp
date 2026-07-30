@@ -19,6 +19,7 @@ import os
 import random
 from datetime import datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -74,6 +75,113 @@ def _get_historical_timeframe(interval: str) -> str:
     elif interval == "MN":
         return "max"
     return "1 month"
+
+
+def _get_session_utc_times(now_utc: datetime, tz_name: str, local_open: int, local_close: int) -> tuple[int, int]:
+    """Convert local market session times to UTC, accounting for DST.
+    
+    Args:
+        now_utc: Current UTC time
+        tz_name: Timezone name (e.g., "America/New_York")
+        local_open: Local market open hour (0-23)
+        local_close: Local market close hour (0-23)
+    
+    Returns:
+        Tuple of (utc_open_hour, utc_close_hour)
+    """
+    try:
+        tz = ZoneInfo(tz_name)
+        
+        # Create a naive datetime with the local hours (for today's date)
+        naive_open = now_utc.replace(hour=local_open, minute=0, second=0, microsecond=0, tzinfo=None)
+        naive_close = now_utc.replace(hour=local_close, minute=0, second=0, microsecond=0, tzinfo=None)
+        
+        # Interpret the naive datetimes as being in the target timezone
+        local_time_open = naive_open.replace(tzinfo=tz)
+        local_time_close = naive_close.replace(tzinfo=tz)
+        
+        # Convert to UTC to get the actual UTC hours
+        utc_open = local_time_open.astimezone(timezone.utc).hour
+        utc_close = local_time_close.astimezone(timezone.utc).hour
+        
+        return (utc_open, utc_close)
+    except Exception as exc:
+        logger.warning(f"Error converting times for {tz_name}: {exc}")
+        # Return default times if conversion fails
+        return (local_open, local_close)
+
+
+def _get_trading_sessions(now_utc: datetime) -> str:
+    """Determine which forex trading sessions are active and their phases.
+    
+    Accounts for daylight savings time by converting local session times to UTC.
+    All session checks are performed entirely in UTC.
+    
+    Returns a formatted string describing active sessions and their phases
+    (beginning/middle/end), e.g. "end of Tokyo session and beginning of London session".
+    """
+    # Check for weekend closure first
+    weekday = now_utc.weekday()  # Monday is 0, Sunday is 6
+    hour = now_utc.hour
+    
+    # Global Weekend Closure: Friday 21:00 UTC -> Sunday 21:00 UTC
+    if (weekday == 4 and hour >= 21) or (weekday == 5) or (weekday == 6 and hour < 21):
+        return "markets closed"
+    
+    # Define sessions in local market hours (used only for conversion to UTC)
+    sessions_local = [
+        ("Sydney", "Australia/Sydney", 7, 16),      # 7 AM - 4 PM local
+        ("Tokyo", "Asia/Tokyo", 9, 16),            # 9 AM - 4 PM local
+        ("London", "Europe/London", 8, 17),        # 8 AM - 5 PM local
+        ("New York", "America/New_York", 9, 16),   # 9 AM - 4 PM local
+    ]
+    
+    # Convert all sessions to UTC (accounting for DST)
+    sessions_utc = []
+    for session_name, tz_name, local_open, local_close in sessions_local:
+        utc_open, utc_close = _get_session_utc_times(now_utc, tz_name, local_open, local_close)
+        sessions_utc.append((session_name, utc_open, utc_close))
+    
+    # Work entirely in UTC from here on
+    active_sessions = []
+    
+    for session_name, utc_open, utc_close in sessions_utc:
+        # Check if market is open in UTC
+        is_active = False
+        if utc_open < utc_close:
+            # Session doesn't wrap around midnight
+            is_active = utc_open <= hour < utc_close
+        else:
+            # Session wraps around midnight
+            is_active = hour >= utc_open or hour < utc_close
+        
+        if is_active:
+            # Calculate phase: beginning (0-33%), middle (33-67%), end (67-100%)
+            if utc_open < utc_close:
+                session_duration = utc_close - utc_open
+                hours_into_session = hour - utc_open
+            else:
+                session_duration = (24 - utc_open) + utc_close
+                if hour >= utc_open:
+                    hours_into_session = hour - utc_open
+                else:
+                    hours_into_session = (24 - utc_open) + hour
+            
+            phase_percent = (hours_into_session / session_duration) * 100
+            
+            if phase_percent < 33:
+                phase = "beginning"
+            elif phase_percent < 67:
+                phase = "middle"
+            else:
+                phase = "end"
+            
+            active_sessions.append(f"{phase} of {session_name} session")
+    
+    if not active_sessions:
+        return "between trading sessions"
+    
+    return " and ".join(active_sessions)
 
 
 def _is_market_open(asset_class: str, now_utc: datetime) -> bool:
@@ -270,6 +378,8 @@ async def pick_market(
         - symbol: The picked market symbol
         - interval: Random interval (M15, M30, H1, H4, D1)
         - historical_data_timeframe: Recommended timeframe for historical data
+        - trading_sessions: Current active trading session(s) with phase description
+                           (e.g. "end of Tokyo session and beginning of London session")
         - current_time_utc: Current UTC time (ISO-8601)
         - current_time_local: Current local time (ISO-8601)
 
@@ -337,11 +447,13 @@ async def pick_market(
     # Step 4: Pick a symbol and validate it (with retry)
     random.shuffle(available_symbols)  # Randomize the list
     picked_symbol = None
+    picked_market = None
     
     for symbol in available_symbols:
         is_valid = await _validate_symbol(symbol)
         if is_valid:
             picked_symbol = symbol
+            picked_market = next((cat for cat, syms in SYMBOLS.items() if symbol in syms), None)
             break
         else:
             logger.info(f"Symbol {symbol} validation failed, skipping")
@@ -357,9 +469,11 @@ async def pick_market(
         valid_intervals = INTERVALS
     interval = random.choice(valid_intervals)
     result = {
+        "market": picked_market,
         "symbol": picked_symbol,
         "interval": interval,
         "timeframe": _get_historical_timeframe(interval),
+        "trading_sessions": _get_trading_sessions(now_utc),
         # "num_open_positions": num_positions,
         # "allowed_additional_positions": allowed_additional_positions,
     }

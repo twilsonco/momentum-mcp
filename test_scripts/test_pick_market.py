@@ -22,7 +22,7 @@ SERVER_ENV = {
     "MT5_MCP_URL": os.getenv("MT5_MCP_URL", "http://10.0.1.105:8080/sse"),
 }
 
-MAX_POSITIONS = 15
+MAX_POSITIONS = 30
 
 
 class MCPClient:
