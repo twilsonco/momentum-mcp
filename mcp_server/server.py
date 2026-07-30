@@ -111,7 +111,7 @@ from mcp_server.bubble import detect_bubble_risk as _detect_bubble_risk
 
 from mcp_server.alpha_cards import generate_alpha_card as _generate_alpha_card
 from mcp_server.warmer import get_alpha_signals as _get_alpha_signals, WARM_TICKERS
-from mcp_server.market_picker import pick_market as _pick_market
+from mcp_server.market_picker import pick_market as _pick_market, INTERVALS
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -280,7 +280,8 @@ async def get_historical_data(
 @mcp.tool()
 async def pick_market(
         max_positions: int = 10,
-        minimum_margin_percent: float = 500.0
+        minimum_margin_percent: float = 500.0,
+        intervals: list[str] = INTERVALS,
     ) -> dict[str, Any]:
     """Pick a random market to trade based on open hours and open positions.
 
@@ -297,6 +298,7 @@ async def pick_market(
     result = await _pick_market(
         max_positions=max_positions,
         minimum_margin_percent=minimum_margin_percent,
+        intervals=intervals,
     )
 
     # Explicitly disconnect MT5 client to prevent Python 3.14 anyio cancel scope error

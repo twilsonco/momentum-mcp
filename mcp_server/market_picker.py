@@ -50,7 +50,9 @@ SYMBOLS = {
     "Energies": ["UKOil", "USOil"],
 }
 
-INTERVALS = ["M15", "M30", "H1", "H4", "D1"]
+ALL_INTERVALS = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "D5", "W1", "MN"]
+
+INTERVALS = ["M15", "H1"]
 
 
 def _get_historical_timeframe(interval: str) -> str:
@@ -241,6 +243,7 @@ async def _validate_symbol(symbol: str) -> bool:
 async def pick_market(
     max_positions: int = 10,
     minimum_margin_percent: float = 500.0,
+    intervals: list[str] = INTERVALS,
 ) -> dict[str, Any]:
     """Pick a random market symbol that doesn't have an open position.
 
@@ -349,7 +352,10 @@ async def pick_market(
         return {"error": msg}
     
     # Step 5: Return result with random interval
-    interval = random.choice(INTERVALS)
+    valid_intervals = [i for i in intervals if i in ALL_INTERVALS]
+    if not valid_intervals:
+        valid_intervals = INTERVALS
+    interval = random.choice(valid_intervals)
     result = {
         "symbol": picked_symbol,
         "interval": interval,
