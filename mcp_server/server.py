@@ -278,19 +278,21 @@ async def get_historical_data(
 
 
 @mcp.tool()
-async def pick_market() -> dict[str, Any]:
+async def pick_market(
+        max_positions: int = 10
+    ) -> dict[str, Any]:
     """Pick a random market to trade based on open hours and open positions.
     
     Automatically excludes symbols that already have open MetaTrader positions.
     Validates each picked symbol using get_symbol_info before returning.
     
     Will abort if:
-    - Already have 10+ open positions
+    - Already have max_positions+ open positions
     - No valid symbols available or all are already traded
     """
     from mcp_server.data import _get_mt5_client
     
-    result = await _pick_market(max_positions=10)
+    result = await _pick_market(max_positions=max_positions)
     
     # Explicitly disconnect MT5 client to prevent Python 3.14 anyio cancel scope error
     try:
