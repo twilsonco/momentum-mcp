@@ -22,6 +22,8 @@ SERVER_ENV = {
     "MT5_MCP_URL": os.getenv("MT5_MCP_URL", "http://10.0.1.105:8080/sse"),
 }
 
+MAX_POSITIONS = 15
+
 
 class MCPClient:
     """Minimal MCP client that communicates via stdio."""
@@ -123,7 +125,7 @@ async def main() -> dict:
         await client.start()
 
         response = await asyncio.wait_for(
-            client.call_tool("pick_market", {}),
+            client.call_tool("pick_market", {"max_positions": MAX_POSITIONS}),
             timeout=30.0,
         )
 

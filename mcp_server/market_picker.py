@@ -266,9 +266,9 @@ async def pick_market(max_positions: int = 10) -> dict[str, Any]:
     result = {
         "symbol": picked_symbol,
         "interval": interval,
-        "historical_data_timeframe": _get_historical_timeframe(interval),
-        "num_open_positions": num_positions,
-        "allowed_additional_positions": allowed_additional_positions,
+        "timeframe": _get_historical_timeframe(interval),
+        # "num_open_positions": num_positions,
+        # "allowed_additional_positions": allowed_additional_positions,
     }
     
     logger.info(f"Picked symbol: {picked_symbol}, interval: {interval}")
