@@ -58,6 +58,116 @@ ALL_INTERVALS = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "D5", "W1", "MN"]
 
 INTERVALS = ["M15", "H1"]
 
+# Market-specific trading hours (local time zones with DST support)
+MARKET_HOURS = {
+    # Indices - stock exchanges (Monday-Friday only)
+    "AUS200": {
+        "timezone": "Australia/Sydney",
+        "open_hour": 10,
+        "open_minute": 0,
+        "close_hour": 16,
+        "close_minute": 0,
+        "weekdays_only": True,
+    },
+    "JPN225": {
+        "timezone": "Asia/Tokyo",
+        "open_hour": 9,
+        "open_minute": 0,
+        "close_hour": 15,
+        "close_minute": 0,
+        "weekdays_only": True,
+    },
+    "ESP35": {
+        "timezone": "Europe/Madrid",
+        "open_hour": 9,
+        "open_minute": 0,
+        "close_hour": 17,
+        "close_minute": 30,
+        "weekdays_only": True,
+    },
+    "FRA40": {
+        "timezone": "Europe/Paris",
+        "open_hour": 9,
+        "open_minute": 0,
+        "close_hour": 17,
+        "close_minute": 30,
+        "weekdays_only": True,
+    },
+    "GER30": {
+        "timezone": "Europe/Berlin",
+        "open_hour": 9,
+        "open_minute": 0,
+        "close_hour": 17,
+        "close_minute": 30,
+        "weekdays_only": True,
+    },
+    "EUSTX50": {
+        "timezone": "Europe/Paris",
+        "open_hour": 9,
+        "open_minute": 0,
+        "close_hour": 17,
+        "close_minute": 30,
+        "weekdays_only": True,
+    },
+    "UK100": {
+        "timezone": "Europe/London",
+        "open_hour": 8,
+        "open_minute": 0,
+        "close_hour": 16,
+        "close_minute": 30,
+        "weekdays_only": True,
+    },
+    "NAS100": {
+        "timezone": "America/New_York",
+        "open_hour": 9,
+        "open_minute": 30,
+        "close_hour": 16,
+        "close_minute": 0,
+        "weekdays_only": True,
+    },
+    "SPX500": {
+        "timezone": "America/New_York",
+        "open_hour": 9,
+        "open_minute": 30,
+        "close_hour": 16,
+        "close_minute": 0,
+        "weekdays_only": True,
+    },
+    "US30": {
+        "timezone": "America/New_York",
+        "open_hour": 9,
+        "open_minute": 30,
+        "close_hour": 16,
+        "close_minute": 0,
+        "weekdays_only": True,
+    },
+    # Futures/Energies - continuous trading with daily breaks
+    "DOLLAR": {
+        "timezone": "America/New_York",
+        "continuous": True,
+        "daily_break_start_hour": 17,
+        "daily_break_start_minute": 0,
+        "daily_break_end_hour": 18,
+        "daily_break_end_minute": 0,
+    },
+    "UKOil": {
+        "timezone": "America/New_York",
+        "continuous": True,
+        "daily_break_start_hour": 18,
+        "daily_break_start_minute": 0,
+        "daily_break_end_hour": 20,
+        "daily_break_end_minute": 0,
+    },
+    "USOil": {
+        "timezone": "America/New_York",
+        "continuous": True,
+        "daily_break_start_hour": 17,
+        "daily_break_start_minute": 0,
+        "daily_break_end_hour": 18,
+        "daily_break_end_minute": 0,
+    },
+}
+
 
 def _get_historical_timeframe(interval: str) -> str:
     """Map interval to recommended historical data timeframe."""
@@ -80,6 +190,36 @@ def _get_historical_timeframe(interval: str) -> str:
     return "1 month"
 
 
+def _convert_local_time_to_utc(now_utc: datetime, tz_name: str, local_hour: int, local_minute: int) -> tuple[int, int]:
+    """Convert local market time to UTC, accounting for DST.
+    
+    Args:
+        now_utc: Current UTC time
+        tz_name: Timezone name (e.g., "America/New_York")
+        local_hour: Local hour (0-23)
+        local_minute: Local minute (0-59)
+    
+    Returns:
+        Tuple of (utc_hour, utc_minute)
+    """
+    try:
+        tz = ZoneInfo(tz_name)
+        
+        # Create a naive datetime with the local time
+        naive_time = now_utc.replace(hour=local_hour, minute=local_minute, second=0, microsecond=0, tzinfo=None)
+        
+        # Interpret as being in the target timezone
+        local_time = naive_time.replace(tzinfo=tz)
+        
+        # Convert to UTC
+        utc_time = local_time.astimezone(timezone.utc)
+        
+        return (utc_time.hour, utc_time.minute)
+    except Exception as exc:
+        logger.warning(f"Error converting time for {tz_name}: {exc}")
+        return (local_hour, local_minute)
+
+
 def _get_session_utc_times(now_utc: datetime, tz_name: str, local_open: int, local_close: int) -> tuple[int, int]:
     """Convert local market session times to UTC, accounting for DST.
     
@@ -92,26 +232,9 @@ def _get_session_utc_times(now_utc: datetime, tz_name: str, local_open: int, loc
     Returns:
         Tuple of (utc_open_hour, utc_close_hour)
     """
-    try:
-        tz = ZoneInfo(tz_name)
-        
-        # Create a naive datetime with the local hours (for today's date)
-        naive_open = now_utc.replace(hour=local_open, minute=0, second=0, microsecond=0, tzinfo=None)
-        naive_close = now_utc.replace(hour=local_close, minute=0, second=0, microsecond=0, tzinfo=None)
-        
-        # Interpret the naive datetimes as being in the target timezone
-        local_time_open = naive_open.replace(tzinfo=tz)
-        local_time_close = naive_close.replace(tzinfo=tz)
-        
-        # Convert to UTC to get the actual UTC hours
-        utc_open = local_time_open.astimezone(timezone.utc).hour
-        utc_close = local_time_close.astimezone(timezone.utc).hour
-        
-        return (utc_open, utc_close)
-    except Exception as exc:
-        logger.warning(f"Error converting times for {tz_name}: {exc}")
-        # Return default times if conversion fails
-        return (local_open, local_close)
+    utc_open, _ = _convert_local_time_to_utc(now_utc, tz_name, local_open, 0)
+    utc_close, _ = _convert_local_time_to_utc(now_utc, tz_name, local_close, 0)
+    return (utc_open, utc_close)
 
 
 def _get_trading_sessions(now_utc: datetime) -> str:
@@ -187,23 +310,93 @@ def _get_trading_sessions(now_utc: datetime) -> str:
     return " and ".join(active_sessions)
 
 
-def _is_market_open(asset_class: str, now_utc: datetime) -> bool:
-    """Check if a market category is open at the given UTC time."""
-    if asset_class == "Crypto":
-        return True
+def _is_market_open(symbol: str, now_utc: datetime) -> bool:
+    """Check if a specific market/symbol is open at the given UTC time.
     
+    Args:
+        symbol: The trading symbol (e.g., "EURUSD", "AUS200", "DOLLAR")
+        now_utc: Current UTC time
+    
+    Returns:
+        True if the market is open, False otherwise.
+    """
     weekday = now_utc.weekday()  # Monday is 0, Sunday is 6
     hour = now_utc.hour
+    minute = now_utc.minute
+    now_minutes = hour * 60 + minute
     
+    # Check if symbol has specific market hours defined
+    if symbol in MARKET_HOURS:
+        hours = MARKET_HOURS[symbol]
+        tz_name = hours.get("timezone")
+        
+        # Handle stock exchanges (weekdays only)
+        if hours.get("weekdays_only"):
+            if weekday >= 5:  # Saturday or Sunday
+                return False
+            
+            # Convert session times from local to UTC
+            open_utc_h, open_utc_m = _convert_local_time_to_utc(
+                now_utc, tz_name, hours["open_hour"], hours["open_minute"]
+            )
+            close_utc_h, close_utc_m = _convert_local_time_to_utc(
+                now_utc, tz_name, hours["close_hour"], hours["close_minute"]
+            )
+            
+            open_minutes = open_utc_h * 60 + open_utc_m
+            close_minutes = close_utc_h * 60 + close_utc_m
+            
+            if open_minutes < close_minutes:
+                # Normal case: open and close on same day
+                return open_minutes <= now_minutes < close_minutes
+            else:
+                # Wraps around midnight
+                return now_minutes >= open_minutes or now_minutes < close_minutes
+        
+        # Handle continuous markets (Futures/Energies) with daily breaks
+        if hours.get("continuous"):
+            # Check daily break window
+            if "daily_break_start_hour" in hours:
+                break_start_utc_h, break_start_utc_m = _convert_local_time_to_utc(
+                    now_utc, tz_name,
+                    hours["daily_break_start_hour"],
+                    hours["daily_break_start_minute"]
+                )
+                break_end_utc_h, break_end_utc_m = _convert_local_time_to_utc(
+                    now_utc, tz_name,
+                    hours["daily_break_end_hour"],
+                    hours["daily_break_end_minute"]
+                )
+                
+                break_start_minutes = break_start_utc_h * 60 + break_start_utc_m
+                break_end_minutes = break_end_utc_h * 60 + break_end_utc_m
+                
+                # Check if we're in the break window
+                if break_start_minutes < break_end_minutes:
+                    # Normal case: break on same day
+                    if break_start_minutes <= now_minutes < break_end_minutes:
+                        return False
+                else:
+                    # Break wraps around midnight
+                    if now_minutes >= break_start_minutes or now_minutes < break_end_minutes:
+                        return False
+            
+            # Check for weekly closure (Friday close around 22:00 UTC)
+            # Global Weekend Closure: Friday 22:00 UTC -> Sunday 22:00 UTC
+            if (weekday == 4 and hour >= 22) or (weekday == 5) or (weekday == 6 and hour < 22):
+                return False
+            
+            return True
+    
+    # Fallback for symbols not in MARKET_HOURS (Forex, Crypto, Metals)
     # Global Weekend Closure: Friday 21:00 UTC -> Sunday 21:00 UTC
     if (weekday == 4 and hour >= 21) or (weekday == 5) or (weekday == 6 and hour < 21):
         return False
     
-    # Daily rollover break for non-Forex (Metals, Indices, Energies)
+    # Daily rollover break for some asset classes (conservative approach)
     # Block hours 21 and 22 UTC to safely cover daylight savings time shifts
-    if asset_class in ["Metals", "Indices", "Futures", "Energies"]:
-        if hour == 21 or hour == 22:
-            return False
+    if hour == 21 or hour == 22:
+        return False
     
     return True
 
@@ -436,10 +629,9 @@ async def pick_market(
     # Step 3: Build available symbols list (only from open markets)
     available_symbols = []
     for category, symbols in SYMBOLS.items():
-        if _is_market_open(category, now_utc):
-            for sym in symbols:
-                if sym not in open_symbols:
-                    available_symbols.append(sym)
+        for sym in symbols:
+            if sym not in open_symbols and _is_market_open(sym, now_utc):
+                available_symbols.append(sym)
     
     if not available_symbols:
         msg = "No open markets available or all open symbols are excluded; Abort immediately"
