@@ -22,10 +22,13 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
+import pytz
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
+
+TZ = "America/Denver"
 
 # MT5 MCP server URL (from environment)
 MT5_MCP_URL: str = os.getenv("MT5_MCP_URL", "").strip()
@@ -394,6 +397,7 @@ async def pick_market(
         return {"error": msg}
 
     now_utc = datetime.now(timezone.utc)
+    now_local = datetime.now(pytz.timezone(TZ))
 
     # Step 1: Get open position symbols
     open_symbols = await _get_open_position_symbols()
@@ -474,6 +478,8 @@ async def pick_market(
         "interval": interval,
         "timeframe": _get_historical_timeframe(interval),
         "trading_sessions": _get_trading_sessions(now_utc),
+        "time_utc": now_utc,
+        "time_local": now_local,
         # "num_open_positions": num_positions,
         # "allowed_additional_positions": allowed_additional_positions,
     }
