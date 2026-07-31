@@ -36,11 +36,9 @@ MT5_MCP_URL: str = os.getenv("MT5_MCP_URL", "").strip()
 # Symbol catalog (same as market_picker.py)
 SYMBOLS = {
     "Crypto": [
-        "BCHBTC", "BCHUSD", "BITUSD", "BTCUSD", "DASHBTC", "DASHUSD", "EDOBIT",
-        "EDOUSD", "EOSBIT", "EOSUSD", "ETCUSD", "ETHBTC", "ETHUSD", "ETPBIT",
-        "ETPUSD", "IOSTBIT", "IOTABIT", "IOTAUSD", "LTCBTC", "LTCUSD", "NEOBTC",
-        "NEOUSD", "OMGBIT", "OMGUSD", "QTUMBIT", "SANBIT", "SANUSD", "TRXUSD",
-        "USDTUSD", "XMRBTC", "XMRUSD", "XRPBIT", "XRPUSD", "ZECBTC", "ZECUSD",
+        "BCHUSD", "BITUSD", "BTCUSD", "DASHUSD", "EDOUSD", "EOSUSD", "ETCUSD",
+        "ETHUSD", "ETPUSD", "IOTAUSD", "LTCUSD", "NEOUSD", "OMGUSD", "SANUSD", 
+        "TRXUSD", "USDTUSD", "XMRUSD", "XRPUSD", "ZECUSD",
     ],
     "FX_majors": ["AUDUSD", "EURUSD", "GBPUSD", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
     "FX_minors": [
@@ -507,6 +505,109 @@ async def _get_margin_level() -> float | None:
 async def _validate_symbol(symbol: str) -> bool:
     """Validate that a symbol can be traded by calling get_symbol_info.
     
+    Here's the full content of symbol info, for reference:
+    {
+        "ask": 1875.47,
+        "askhigh": 1940.04,
+        "asklow": 1852.04,
+        "bank": "",
+        "basis": "",
+        "bid": 1870.64,
+        "bidhigh": 1934.76,
+        "bidlow": 1847.06,
+        "category": "",
+        "chart_mode": 0,
+        "currency_base": "USD",
+        "currency_margin": "USD",
+        "currency_profit": "USD",
+        "custom": false,
+        "description": "ETHEREUM v US DOLLAR",
+        "digits": 2,
+        "exchange": "",
+        "expiration_mode": 15,
+        "expiration_time": 0,
+        "filling_mode": 1,
+        "formula": "",
+        "isin": "",
+        "last": 0,
+        "lasthigh": 0,
+        "lastlow": 0,
+        "margin_hedged": 0,
+        "margin_hedged_use_leg": false,
+        "margin_initial": 0,
+        "margin_maintenance": 0,
+        "n_fields": 96,
+        "n_sequence_fields": 96,
+        "n_unnamed_fields": 0,
+        "name": "ETHUSD",
+        "option_mode": 0,
+        "option_right": 0,
+        "option_strike": 0,
+        "order_gtc_mode": 0,
+        "order_mode": 127,
+        "page": "",
+        "path": "Cryptos\\ETHUSD",
+        "point": 0.01,
+        "price_change": -2.5647,
+        "price_greeks_delta": 0,
+        "price_greeks_gamma": 0,
+        "price_greeks_omega": 0,
+        "price_greeks_rho": 0,
+        "price_greeks_theta": 0,
+        "price_greeks_vega": 0,
+        "price_sensitivity": 0,
+        "price_theoretical": 0,
+        "price_volatility": 0,
+        "select": true,
+        "session_aw": 0,
+        "session_buy_orders": 0,
+        "session_buy_orders_volume": 0,
+        "session_close": 1919.88,
+        "session_deals": 0,
+        "session_interest": 0,
+        "session_open": 1919.88,
+        "session_price_limit_max": 0,
+        "session_price_limit_min": 0,
+        "session_price_settlement": 0,
+        "session_sell_orders": 0,
+        "session_sell_orders_volume": 0,
+        "session_turnover": 0,
+        "session_volume": 0,
+        "spread": 483,
+        "spread_float": true,
+        "start_time": 0,
+        "swap_long": -25,
+        "swap_mode": 6,
+        "swap_rollover3days": 7,
+        "swap_short": -25,
+        "ticks_bookdepth": 0,
+        "time": 1785532534,
+        "trade_accrued_interest": 0,
+        "trade_calc_mode": 2,
+        "trade_contract_size": 100,
+        "trade_exemode": 2,
+        "trade_face_value": 0,
+        "trade_freeze_level": 0,
+        "trade_liquidity_rate": 0,
+        "trade_mode": 4,
+        "trade_stops_level": 0,
+        "trade_tick_size": 0.01,
+        "trade_tick_value": 1,
+        "trade_tick_value_loss": 1,
+        "trade_tick_value_profit": 1,
+        "visible": true,
+        "volume": 0,
+        "volume_limit": 0,
+        "volume_max": 10,
+        "volume_min": 0.01,
+        "volume_real": 0,
+        "volume_step": 0.01,
+        "volumehigh": 0,
+        "volumehigh_real": 0,
+        "volumelow": 0,
+        "volumelow_real": 0
+    }
+    
     Returns:
         True if symbol is valid and can be traded, False otherwise.
     """
@@ -520,18 +621,31 @@ async def _validate_symbol(symbol: str) -> bool:
         client = _get_mt5_client()
         result = await asyncio.wait_for(
             client.call_tool(
-                "get_symbol_price",
+                "get_symbol_info",
                 {"symbol_name": symbol},
             ),
-            timeout=3.0,
+            timeout=15.0,
         )
         
         # If we got a response with content, assume the symbol is valid
         if result and result.content:
             for content in result.content:
                 if hasattr(content, "text") and content.text.strip():
-                    logger.debug(f"Symbol {symbol} validated successfully")
-                    return True
+                    try:
+                        s = json.loads(content.text.strip())
+                        print(s)
+                        check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step"]
+                        missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
+                        if not missing_check_fields:
+                            logger.debug(f"Symbol {symbol} validated successfully")
+                            return True
+                        else:
+                            logger.warning(f"Symbol {symbol} validation failed: missing required fields: {missing_check_fields}")
+                            return False
+                    except json.JSONDecodeError:
+                        logger.warning(f"get_symbol_info returned non-JSON for {symbol}: {content.text.strip()[:200]}")
+                        return False
+                    
         
         logger.warning(f"Symbol {symbol} validation returned empty response")
         return False

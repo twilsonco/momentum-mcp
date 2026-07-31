@@ -84,7 +84,7 @@ async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
                     "get_symbol_info",
                     {"symbol_name": symbol},
                 ),
-                timeout=3.0
+                timeout=15.0
             )
             for content in info_result.content:
                 if hasattr(content, "text"):
@@ -220,35 +220,19 @@ async def calculate_mt5_position_size(
             logger.info(f"Using provided entry price: {entry_price}")
         
         # Require tick data for accurate cross-currency math
-        # trade_tick_value is the monetary value of a single tick movement for exactly
-        # 1.0 standard lot, expressed in the account's base currency. This inherently
-        # accounts for the account's base currency, live cross-rates, and asset class.
         tick_size = symbol_info.get("trade_tick_size") if symbol_info else None
-        tick_value = symbol_info.get("trade_tick_value") if symbol_info else None
         
-        # Fallback defaults for common symbols if tick data unavailable
-        # (Used for testing when get_symbol_info tool not yet deployed to MT5 MCP server)
-        default_tick_config = {
-            "ETHBTC": {"tick_size": 0.00001, "tick_value": 10.0},
-            "EURUSD": {"tick_size": 0.00001, "tick_value": 10.0},
-            "GBPUSD": {"tick_size": 0.00001, "tick_value": 10.0},
-            "BTCUSD": {"tick_size": 0.01, "tick_value": 1.0},
-            "XAUUSD": {"tick_size": 0.01, "tick_value": 10.0},  # Gold per oz
-        }
+        # Prioritize 'trade_tick_value_loss' for Stop Loss calculations, fallback to standard tick value
+        tick_value = symbol_info.get("trade_tick_value_loss") if symbol_info else None
         
-        if (not tick_size or not tick_value) and symbol in default_tick_config:
-            logger.warning(
-                f"Tick data unavailable for {symbol} (get_symbol_info not deployed). "
-                f"Using default values for testing."
-            )
-            tick_size = default_tick_config[symbol]["tick_size"]
-            tick_value = default_tick_config[symbol]["tick_value"]
+        if not tick_value or tick_value <= 0:
+            tick_value = symbol_info.get("trade_tick_value") if symbol_info else None
         
-        if not tick_size or not tick_value:
+        if not tick_size or not tick_value or tick_value <= 0:
             return SignalResult.error_msg(
-                f"Missing tick data for {symbol}. Ensure the MT5 MCP server exposes "
-                f"'trade_tick_size' and 'trade_tick_value' (requires get_symbol_info tool). "
-                f"Common symbols supported: {', '.join(default_tick_config.keys())}"
+                f"Missing or invalid tick data for {symbol}. Ensure the MT5 MCP server exposes "
+                f"'trade_tick_size', 'trade_tick_value', or 'trade_tick_value_loss'. "
+                f"Removing from valid symbols to protect account equity."
             )
         
         # Validate setup and calculate raw price distance
