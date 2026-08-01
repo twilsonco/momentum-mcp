@@ -24,6 +24,8 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 import pytz
 
+from mcp_server.charts import generate_chart as _generate_chart, ChartResult
+
 load_dotenv()
 
 logger = logging.getLogger(__name__)
@@ -52,9 +54,10 @@ SYMBOLS = {
     "Energies": ["UKOil", "USOil"],
 }
 
-ALL_INTERVALS = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "D5", "W1", "MN"]
+ALL_INTERVALS = ["1m", "2m", "5m", "15m", "30m", "60m", "90m",
+    "1h", "1d", "5d", "1wk", "1mo", "3mo",]
 
-INTERVALS = ["M15", "H1"]
+INTERVALS = ["15m", "1h"]
 
 # Market-specific trading hours (local time zones with DST support)
 MARKET_HOURS = {
@@ -193,25 +196,25 @@ MARKET_ADJUSTMENTS = {
 - Avoid trading 1 hour before scheduled reports; spreads widen 2–5 pips during liquid hours."""
 }
 
-def _get_historical_timeframe(interval: str) -> str:
+def _get_historical_timeframe(interval: str) -> tuple[str, str]:
     """Map interval to recommended historical data timeframe."""
-    if interval in ["M1", "M5"]:
-        return "1 day"
-    elif interval in ["M15", "M30"]:
-        return "5 days"
-    elif interval == "H1":
-        return "1 month"
-    elif interval == "H4":
-        return "3 months"
-    elif interval == "D1":
-        return "6 months"
-    elif interval == "D5":
-        return "2 years"
-    elif interval == "W1":
-        return "5 years"
-    elif interval == "MN":
-        return "max"
-    return "1 month"
+    if interval in ["1m", "2m", "5m"]:
+        return ("1 day", "1d")
+    elif interval in ["15m", "30m"]:
+        return ("5 days", "5d")
+    elif interval == "1h":
+        return ("1 month", "1mo")
+    elif interval == "4h":
+        return ("3 months", "3mo")
+    elif interval == "1d":
+        return ("6 months", "6mo")
+    elif interval == "5d":
+        return ("2 years", "2y")
+    elif interval == "1wk":
+        return ("5 years", "5y")
+    elif interval == "1mo":
+        return ("max", "max")
+    return ("1 month", "1mo")
 
 
 def _convert_local_time_to_utc(now_utc: datetime, tz_name: str, local_hour: int, local_minute: int) -> tuple[int, int]:
@@ -532,7 +535,7 @@ async def _get_margin_level() -> float | None:
         return None
 
 
-async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
+async def _validate_symbol(symbol: str, interval: str, timeframe: str, generate_chart: bool) -> tuple[bool, dict, ChartResult | None]:
     """Validate that a symbol can be traded by calling get_symbol_info.
     
     Here's the full content of symbol info, for reference:
@@ -643,7 +646,7 @@ async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
     """
     if not MT5_MCP_URL:
         logger.debug(f"MT5_MCP_URL not configured, cannot validate {symbol}")
-        return True, {}   # Assume valid if we can't check
+        return True, {}, None   # Assume valid if we can't check
     
     try:
         from mcp_server.mt5_position_sizer import _get_mt5_client
@@ -663,35 +666,44 @@ async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
                 if hasattr(content, "text") and content.text.strip():
                     try:
                         s = json.loads(content.text.strip())
-                        print(s)
                         check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step"]
                         missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
                         if not missing_check_fields:
+                            chart_data = None
+                            if generate_chart:
+                                try:
+                                    chart_data = await _generate_chart(symbol, interval=interval, period=timeframe)
+                                    logger.debug(f"Symbol {symbol} validated successfully")
+                                    return True, s, chart_data
+                                except Exception as e:
+                                    logger.warning(f"Failed to generate chart for {symbol}: {e}")
+                                    return False, s, {}
                             logger.debug(f"Symbol {symbol} validated successfully")
-                            return True, s
+                            return True, s, chart_data
                         else:
                             logger.warning(f"Symbol {symbol} validation failed: missing required fields: {missing_check_fields}")
-                            return False, s
+                            return False, s, None
                     except json.JSONDecodeError:
                         logger.warning(f"get_symbol_info returned non-JSON for {symbol}: {content.text.strip()[:200]}")
-                        return False, {}
+                        return False, {}, None
                     
         
         logger.warning(f"Symbol {symbol} validation returned empty response")
-        return False, {}
+        return False, {}, None
     
     except asyncio.TimeoutError:
         logger.warning(f"Timeout validating symbol {symbol} (15s)")
-        return False, {}
+        return False, {}, None
     except Exception as exc:
         logger.warning(f"Failed to validate symbol {symbol}: {exc}")
-        return False, {}
+        return False, {}, None
 
 
 async def pick_market(
     max_positions: int = 10,
     minimum_margin_percent: float = 500.0,
     intervals: list[str] = INTERVALS,
+    generate_chart: bool = True,
 ) -> dict[str, Any]:
     """Pick a random market symbol that doesn't have an open position.
 
@@ -784,13 +796,20 @@ async def pick_market(
     
     logger.debug(f"Available symbols for trading: {len(available_symbols)}")
     
-    # Step 4: Pick a symbol and validate it (with retry)
+    # Step 4: Get random interval and associated timeframe    
+    valid_intervals = [i for i in intervals if i in ALL_INTERVALS]
+    if not valid_intervals:
+        valid_intervals = INTERVALS
+    interval = random.choice(valid_intervals)
+    timeframe = _get_historical_timeframe(interval)
+    
+    # Step 5: Pick a symbol and validate it (with retry)
     random.shuffle(available_symbols)  # Randomize the list
     picked_symbol = None
     picked_market = None
     
     for symbol in available_symbols:
-        is_valid, symbol_info = await _validate_symbol(symbol)
+        is_valid, symbol_info, chart_data = await _validate_symbol(symbol, interval, timeframe[1], generate_chart=generate_chart)
         if is_valid:
             picked_symbol = symbol
             picked_market = next((cat for cat, syms in SYMBOLS.items() if symbol in syms), None)
@@ -803,23 +822,32 @@ async def pick_market(
         logger.error(msg)
         return {"error": msg}
     
-    # Step 5: Return result with random interval
-    valid_intervals = [i for i in intervals if i in ALL_INTERVALS]
-    if not valid_intervals:
-        valid_intervals = INTERVALS
-    interval = random.choice(valid_intervals)
+    # Step 5: Return 
+    
     result = {
         "market": picked_market,
         "symbol": picked_symbol,
+        "desc": symbol_info.get("description") if symbol_info else None,
         "interval": interval,
-        "timeframe": _get_historical_timeframe(interval),
+        "timeframe": timeframe,
         "trading_sessions": _get_trading_sessions(now_utc),
         "time_utc": now_utc,
         "time_local": now_local,
         "market_adjustment": MARKET_ADJUSTMENTS.get(picked_market, None),
-        "spread": symbol_info.get("spread") if symbol_info else None,
-        "ask": symbol_info.get("ask") if symbol_info else None,
-        "bid": symbol_info.get("bid") if symbol_info else None,
+        "symbol_data": {
+            "spread": symbol_info.get("spread") if symbol_info else None,
+            "ask": symbol_info.get("ask") if symbol_info else None,
+            "bid": symbol_info.get("bid") if symbol_info else None,
+            "trade_contract_size": symbol_info.get("trade_contract_size") if symbol_info else None,
+            "trade_tick_size": symbol_info.get("trade_tick_size") if symbol_info else None,
+            "trade_tick_value": symbol_info.get("trade_tick_value") if symbol_info else None,
+            "volume_max": symbol_info.get("volume_max") if symbol_info else None,
+            "volume_min": symbol_info.get("volume_min") if symbol_info else None,
+            "volume_step": symbol_info.get("volume_step") if symbol_info else None,
+            "digits": symbol_info.get("digits") if symbol_info else None,
+            "point": symbol_info.get("point") if symbol_info else None
+        },
+        "chart_data": chart_data,
         # "num_open_positions": num_positions,
         # "allowed_additional_positions": allowed_additional_positions,
     }

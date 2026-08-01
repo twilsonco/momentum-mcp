@@ -172,8 +172,6 @@ async def get_historical_data(
     """
     ticker = ticker.strip().upper()
 
-    if interval == "1M":
-        interval = "1mo"
     if period == "1M":
         period = "1mo"
 

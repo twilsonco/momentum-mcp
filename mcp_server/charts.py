@@ -70,14 +70,14 @@ _STYLE = mpf.make_mpf_style(
     ),
     facecolor="#0f0f0f",
     figcolor="#0f0f0f",
-    gridcolor="#1a1a1a",
+    gridcolor="#858585",
     gridstyle="--",
     y_on_right=True,
     rc={
-        "font.size": 9,
-        "axes.labelcolor": "#cccccc",
-        "xtick.color": "#888888",
-        "ytick.color": "#888888",
+        "font.size": 11,
+        "axes.labelcolor": "#e1e1e1",
+        "xtick.color": "#C9C9C9",
+        "ytick.color": "#C9C9C9",
     },
 )
 
