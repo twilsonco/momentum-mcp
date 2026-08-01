@@ -666,7 +666,7 @@ async def _validate_symbol(symbol: str, interval: str, timeframe: str, generate_
                 if hasattr(content, "text") and content.text.strip():
                     try:
                         s = json.loads(content.text.strip())
-                        check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step"]
+                        check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step", "spread", "volume_max", "volume_min"]
                         missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
                         if not missing_check_fields:
                             chart_data = None
@@ -843,9 +843,7 @@ async def pick_market(
             "trade_tick_value": symbol_info.get("trade_tick_value") if symbol_info else None,
             "volume_max": symbol_info.get("volume_max") if symbol_info else None,
             "volume_min": symbol_info.get("volume_min") if symbol_info else None,
-            "volume_step": symbol_info.get("volume_step") if symbol_info else None,
-            "digits": symbol_info.get("digits") if symbol_info else None,
-            "point": symbol_info.get("point") if symbol_info else None
+            "volume_step": symbol_info.get("volume_step") if symbol_info else None
         },
         "chart_data": chart_data,
         # "num_open_positions": num_positions,
