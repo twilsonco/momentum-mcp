@@ -166,6 +166,32 @@ MARKET_HOURS = {
     },
 }
 
+MARKET_ADJUSTMENTS = {
+    "Crypto": """- Frequent liquidity hunts break recent swing levels; use 2x to 2.5x ATR buffer on shorter timeframes.
+- Validate spread tolerance strictly; spreads widen during low-volume periods.""",
+    "FX_majors": """- Respect support and resistance cleanly during Asian session; breaks occur during London/New York overlap.
+- Avoid placing SLs at round numbers where central banks defend.
+- SL buffer: 1.5x ATR standard; increase to 2x ATR during high-impact news windows.""",
+    "FX_minors": """- Tighter trading ranges and lower volume; wider spreads during Asian/early European sessions.
+- Prioritize entries during London/New York open for tighter fills.
+- Commodity-linked minors spike on commodity price shocks; monitor correlation pairs.
+- Use 1.5x to 2x ATR for SL buffer; be conservative on position sizing.""",
+    "Metals": """- Move incredibly fast during London and New York session opens.
+- Avoid tight SLs at obvious structural levels; use 1.5x to 2.5x ATR cushion, especially around major economic data.
+- Silver exhibits higher volatility; increase buffer to 2x to 2.5x ATR.
+- Spread tolerance critical (3–5 pips possible during quiet hours); tighten TP or abort if spread exceeds 15% of SL distance.""",
+    "Indices": """- Highly correlated with equity market open times; avoid tight SLs at round numbers.
+- Use 1.5x to 2x ATR on shorter timeframes; reduce to 1.2x ATR on daily+ charts for longer-term setups.
+- Monitor overnight gaps; Monday opens often show directional reversals.""",
+    "Futures": """- Sensitive to inventory reports and geopolitical shocks; avoid trading 30 minutes before scheduled releases.
+- Use 2x to 3x ATR for SL buffer on shorter timeframes (3x ATR is the hard ceiling).
+- Micro contracts allow tighter SLs (1.5x ATR) due to lower notional risk.
+- Avoid trading 1–2 days before contract expiration due to liquidity migration.""",
+    "Energies": """- Driven by OPEC+ decisions, geopolitical tensions, and strategic reserve releases.
+- Correlate closely with the US Dollar; monitor DXY for directional bias.
+- Extremely volatile on weather forecasts and inventory data; use 2.5x to 3x ATR buffer.
+- Avoid trading 1 hour before scheduled reports; spreads widen 2–5 pips during liquid hours."""
+}
 
 def _get_historical_timeframe(interval: str) -> str:
     """Map interval to recommended historical data timeframe."""
@@ -250,7 +276,7 @@ def _get_trading_sessions(now_utc: datetime) -> str:
     
     # Global Weekend Closure: Friday 21:00 UTC -> Sunday 21:00 UTC
     if (weekday == 4 and hour >= 21) or (weekday == 5) or (weekday == 6 and hour < 21):
-        return "markets closed"
+        return "markets closed; Crypto open"
     
     # Define sessions in local market hours (used only for conversion to UTC)
     sessions_local = [
@@ -387,15 +413,19 @@ def _is_market_open(symbol: str, now_utc: datetime) -> bool:
             return True
     
     # Fallback for symbols not in MARKET_HOURS (Forex, Crypto, Metals)
+    # Crypto markets are 24/7 and should always be considered open
+    if symbol in SYMBOLS.get("Crypto", []):
+        return True
+
     # Global Weekend Closure: Friday 21:00 UTC -> Sunday 21:00 UTC
     if (weekday == 4 and hour >= 21) or (weekday == 5) or (weekday == 6 and hour < 21):
         return False
-    
+
     # Daily rollover break for some asset classes (conservative approach)
     # Block hours 21 and 22 UTC to safely cover daylight savings time shifts
     if hour == 21 or hour == 22:
         return False
-    
+
     return True
 
 
@@ -502,7 +532,7 @@ async def _get_margin_level() -> float | None:
         return None
 
 
-async def _validate_symbol(symbol: str) -> bool:
+async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
     """Validate that a symbol can be traded by calling get_symbol_info.
     
     Here's the full content of symbol info, for reference:
@@ -613,7 +643,7 @@ async def _validate_symbol(symbol: str) -> bool:
     """
     if not MT5_MCP_URL:
         logger.debug(f"MT5_MCP_URL not configured, cannot validate {symbol}")
-        return True  # Assume valid if we can't check
+        return True, {}   # Assume valid if we can't check
     
     try:
         from mcp_server.mt5_position_sizer import _get_mt5_client
@@ -638,24 +668,24 @@ async def _validate_symbol(symbol: str) -> bool:
                         missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
                         if not missing_check_fields:
                             logger.debug(f"Symbol {symbol} validated successfully")
-                            return True
+                            return True, s
                         else:
                             logger.warning(f"Symbol {symbol} validation failed: missing required fields: {missing_check_fields}")
-                            return False
+                            return False, s
                     except json.JSONDecodeError:
                         logger.warning(f"get_symbol_info returned non-JSON for {symbol}: {content.text.strip()[:200]}")
-                        return False
+                        return False, {}
                     
         
         logger.warning(f"Symbol {symbol} validation returned empty response")
-        return False
+        return False, {}
     
     except asyncio.TimeoutError:
-        logger.warning(f"Timeout validating symbol {symbol} (3s)")
-        return False
+        logger.warning(f"Timeout validating symbol {symbol} (15s)")
+        return False, {}
     except Exception as exc:
         logger.warning(f"Failed to validate symbol {symbol}: {exc}")
-        return False
+        return False, {}
 
 
 async def pick_market(
@@ -760,7 +790,7 @@ async def pick_market(
     picked_market = None
     
     for symbol in available_symbols:
-        is_valid = await _validate_symbol(symbol)
+        is_valid, symbol_info = await _validate_symbol(symbol)
         if is_valid:
             picked_symbol = symbol
             picked_market = next((cat for cat, syms in SYMBOLS.items() if symbol in syms), None)
@@ -786,6 +816,10 @@ async def pick_market(
         "trading_sessions": _get_trading_sessions(now_utc),
         "time_utc": now_utc,
         "time_local": now_local,
+        "market_adjustment": MARKET_ADJUSTMENTS.get(picked_market, None),
+        "spread": symbol_info.get("spread") if symbol_info else None,
+        "ask": symbol_info.get("ask") if symbol_info else None,
+        "bid": symbol_info.get("bid") if symbol_info else None,
         # "num_open_positions": num_positions,
         # "allowed_additional_positions": allowed_additional_positions,
     }
