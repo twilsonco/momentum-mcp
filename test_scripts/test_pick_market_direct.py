@@ -4,6 +4,7 @@
 Imports market_picker module and calls pick_market() directly, then prints the result as JSON.
 """
 
+import logging
 import asyncio
 import json
 import os
@@ -16,11 +17,24 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 # Configure environment
 os.environ.setdefault("PYTHONPATH", str(PROJECT_ROOT))
-os.environ.setdefault("MT5_MCP_URL", os.getenv("MT5_MCP_URL", "http://10.0.1.105:8080/sse"))
+
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 from mcp_server.market_picker import pick_market
 
 MAX_POSITIONS = 30
+
+logging.basicConfig(
+    level=os.getenv("MCP_LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+# Quiet down noisy third-party loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 
 async def main() -> dict:

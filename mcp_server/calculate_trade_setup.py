@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import pandas as pd
+import pandas_ta as ta
 import numpy as np
 from typing import Any
 from datetime import timedelta
@@ -57,7 +58,32 @@ async def _get_symbol_info(symbol: str) -> dict:
         logger.warning(f"Failed to validate symbol {symbol}: {exc}")
         return {}
 
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.25, digits: int = 5):
+def _extract_last(series: pd.Series | None) -> float | None:
+    """Get the last non-NaN value from a series, rounded."""
+    return _extract_at(series, -1)
+
+
+def _extract_at(series: pd.Series | None, idx: int = -1) -> float | None:
+    """Get the value at a specific index from a series, rounded.
+
+    Args:
+        series: A pandas Series (e.g., RSI values over time).
+        idx: The index position (negative for from-end, e.g. -2 = second-to-last).
+
+    Returns:
+        Rounded float value, or None if unavailable.
+    """
+    if series is None or series.empty:
+        return None
+    try:
+        val = series.iloc[idx]
+        if pd.isna(val):
+            return None
+        return round(float(val), 4)
+    except (IndexError, KeyError):
+        return None
+
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.5, digits: int = 5):
     """
     Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
     
@@ -69,14 +95,13 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     atr_period (int): Period for ATR calculation (default 14)
     """
     
-    # 1. Calculate ATR (Current)
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df['ATR'] = tr.rolling(window=atr_period).mean()
+    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}")
     
-    current_atr = df['ATR'].iloc[-1]
+    # 1. Calculate ATR (Current)
+    close = pd.to_numeric(df["Close"], errors="coerce")
+    high = pd.to_numeric(df["High"], errors="coerce")
+    low = pd.to_numeric(df["Low"], errors="coerce")
+    current_atr = _extract_last(ta.atr(high, low, close, length=14))
     last_timestamp = df.index[-1]
     
     # Define time windows based on available data.
@@ -168,6 +193,12 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     else:
         final_tp = entry_price - (sl_distance * target_rr)
     
+    if final_tp <= 0 or proposed_sl <= 0:
+        return {
+            "status": "Abort",
+            "reason": f"Invalid final TP ({final_tp}) or proposed SL ({proposed_sl})"
+        }
+    
     final_tp = round(final_tp, digits)
 
     # 5. Check Spread Limit
@@ -185,7 +216,7 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         "take_profit": final_tp,
         "risk_reward_ratio": f"1:{target_rr}",
         "sl_distance": sl_distance,
-        "atr": round(current_atr, digits)
+        "atr": current_atr
     }
 
 
@@ -253,10 +284,12 @@ async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol
     spread = symbol_info["ask"] - symbol_info["bid"]
     
     # Calculate long setup
+    logger.info(f"Calculating long setup for {ticker}")
     long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, max_spread_factor_of_sl_dist=0.25, digits=symbol_info["digits"])
     ret["long_buy_setup"] = long_setup
     
     # Calculate short setup
+    logger.info(f"Calculating short setup for {ticker}")
     short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, max_spread_factor_of_sl_dist=0.25, digits=symbol_info["digits"])
     ret["short_sell_setup"] = short_setup
 

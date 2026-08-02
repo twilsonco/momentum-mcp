@@ -454,11 +454,11 @@ class _MT5Client:
                 # Add timeout to the tool call itself
                 result = await asyncio.wait_for(
                     session.call_tool(name, args),
-                    timeout=15.0  # 15s per tool call
+                    timeout=60.0  # 60s per tool call
                 )
                 return result
             except asyncio.TimeoutError:
-                last_exc = TimeoutError(f"MT5 MCP tool '{name}' timeout (15s)")
+                last_exc = TimeoutError(f"MT5 MCP tool '{name}' timeout (60s)")
                 logger.warning(
                     "MT5 MCP call '%s' timeout (attempt %d)",
                     name, attempt + 1,

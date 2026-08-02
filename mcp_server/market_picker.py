@@ -26,6 +26,7 @@ import pytz
 
 from mcp_server.charts import generate_chart as _generate_chart, ChartResult
 from mcp_server.calculate_trade_setup import calculate_trade_setups
+from mcp_server.mt5_position_sizer import calculate_mt5_position_size
 
 load_dotenv()
 
@@ -813,6 +814,22 @@ async def pick_market(
                     continue
             else:
                 chart_data = None
+            
+            position_size_long = await calculate_mt5_position_size(symbol,
+                "long", 
+                trade_setups["long_buy_setup"]["entry"],
+                trade_setups["long_buy_setup"]["stop_loss"]
+            )
+            trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_percent": position_size_long.data["actual_risk_percent"]}
+            
+            position_size_short = await calculate_mt5_position_size(symbol, 
+                "short", 
+                trade_setups["short_sell_setup"]["entry"],
+                trade_setups["short_sell_setup"]["stop_loss"]
+            )
+            trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_percent": position_size_short.data["actual_risk_percent"]}
+            print(trade_setups)
+            
             picked_symbol = symbol
             picked_market = next((cat for cat, syms in SYMBOLS.items() if symbol in syms), None)
             break
