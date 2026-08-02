@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 import pytz
 
 from mcp_server.charts import generate_chart as _generate_chart, ChartResult
+from mcp_server.calculate_trade_setup import calculate_trade_setups
 
 load_dotenv()
 
@@ -535,7 +536,7 @@ async def _get_margin_level() -> float | None:
         return None
 
 
-async def _validate_symbol(symbol: str, interval: str, timeframe: str, generate_chart: bool) -> tuple[bool, dict, ChartResult | None]:
+async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
     """Validate that a symbol can be traded by calling get_symbol_info.
     
     Here's the full content of symbol info, for reference:
@@ -646,7 +647,7 @@ async def _validate_symbol(symbol: str, interval: str, timeframe: str, generate_
     """
     if not MT5_MCP_URL:
         logger.debug(f"MT5_MCP_URL not configured, cannot validate {symbol}")
-        return True, {}, None   # Assume valid if we can't check
+        return True, {}   # Assume valid if we can't check
     
     try:
         from mcp_server.mt5_position_sizer import _get_mt5_client
@@ -669,34 +670,25 @@ async def _validate_symbol(symbol: str, interval: str, timeframe: str, generate_
                         check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step", "spread", "volume_max", "volume_min"]
                         missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
                         if not missing_check_fields:
-                            chart_data = None
-                            if generate_chart:
-                                try:
-                                    chart_data = await _generate_chart(symbol, interval=interval, period=timeframe)
-                                    logger.debug(f"Symbol {symbol} validated successfully")
-                                    return True, s, chart_data
-                                except Exception as e:
-                                    logger.warning(f"Failed to generate chart for {symbol}: {e}")
-                                    return False, s, {}
                             logger.debug(f"Symbol {symbol} validated successfully")
-                            return True, s, chart_data
+                            return True, s
                         else:
                             logger.warning(f"Symbol {symbol} validation failed: missing required fields: {missing_check_fields}")
-                            return False, s, None
+                            return False, s
                     except json.JSONDecodeError:
                         logger.warning(f"get_symbol_info returned non-JSON for {symbol}: {content.text.strip()[:200]}")
-                        return False, {}, None
+                        return False, {}
                     
         
         logger.warning(f"Symbol {symbol} validation returned empty response")
-        return False, {}, None
+        return False, {}
     
     except asyncio.TimeoutError:
         logger.warning(f"Timeout validating symbol {symbol} (15s)")
-        return False, {}, None
+        return False, {}
     except Exception as exc:
         logger.warning(f"Failed to validate symbol {symbol}: {exc}")
-        return False, {}, None
+        return False, {}
 
 
 async def pick_market(
@@ -806,11 +798,21 @@ async def pick_market(
     # Step 5: Pick a symbol and validate it (with retry)
     random.shuffle(available_symbols)  # Randomize the list
     picked_symbol = None
-    picked_market = None
     
     for symbol in available_symbols:
-        is_valid, symbol_info, chart_data = await _validate_symbol(symbol, interval, timeframe[1], generate_chart=generate_chart)
+        is_valid, symbol_info = await _validate_symbol(symbol)
         if is_valid:
+            trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info)
+            if "abort" in str(trade_setups).lower():
+                continue
+            if generate_chart:
+                try:
+                    chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1])
+                except Exception as e:
+                    logger.error(f"Failed to generate chart for {symbol}: {e}")
+                    continue
+            else:
+                chart_data = None
             picked_symbol = symbol
             picked_market = next((cat for cat, syms in SYMBOLS.items() if symbol in syms), None)
             break
@@ -849,6 +851,7 @@ async def pick_market(
         # "num_open_positions": num_positions,
         # "allowed_additional_positions": allowed_additional_positions,
     }
+    result |= trade_setups
     
     logger.info(f"Picked symbol: {picked_symbol}, interval: {interval}")
     return result

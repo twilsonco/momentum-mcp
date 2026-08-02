@@ -140,6 +140,7 @@ async def get_historical_data(
     ticker: str,
     period: str = "3mo",
     interval: str = "1d",
+    fallback_for_incomplete_data: bool = True,
 ) -> list[dict[str, Any]]:
     """Fetch OHLCV historical data for any symbol.
 
@@ -160,6 +161,11 @@ async def get_historical_data(
         interval: Bar interval. One of: ``1m``, ``2m``, ``5m``, ``15m``,
             ``30m``, ``60m``, ``90m``, ``1h``, ``1d``, ``5d``, ``1wk``,
             ``1mo``, ``3mo``. Defaults to ``"1d"``.
+        fallback_for_incomplete_data: When ``True`` (default), if a source
+            returns data that doesn't span the full requested *period*, the
+            next source in the chain is tried. When ``False``, partial data
+            is accepted as-is — useful for callers (e.g. trade setup
+            calculators) that don't actually need the full requested window.
 
     Returns:
         A list of dicts with keys: ``date``, ``open``, ``high``, ``low``,
@@ -208,11 +214,19 @@ async def get_historical_data(
                     msg = (
                         f"Incomplete date range from {source_name}: got {len(records)} bars "
                         f"spanning only {(pd.to_datetime(records[-1]['date']) - pd.to_datetime(records[0]['date'])).days} days "
-                        f"for {ticker} (requested {period}). Trying next source..."
+                        f"for {ticker} (requested {period})."
                     )
-                    logger.warning(msg)
-                    errors.append(msg)
-                    continue  # Try next source
+                    if fallback_for_incomplete_data:
+                        msg += " Trying next source..."
+                        logger.warning(msg)
+                        errors.append(msg)
+                        continue  # Try next source
+                    # Caller is OK with partial data — accept it
+                    logger.info(
+                        "%s Accepting partial data from %s (fallback_for_incomplete_data=False).",
+                        msg, source_name,
+                    )
+                    return records
                 logger.info(
                     "Fetched %d bars for %s from %s (period=%s, interval=%s)",
                     len(records), ticker, source_name, period, interval,
@@ -237,23 +251,37 @@ async def get_historical_data(
 def _fetch_from_yfinance(
     ticker: str, period: str, interval: str
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV from yfinance. Tries multiple ticker formats for forex pairs.
+    """Fetch OHLCV from yfinance. Tries multiple ticker formats for forex/crypto pairs.
     
-    For forex (e.g., EURUSD), tries formats: EURUSD, EURUSD=X, EUR-USD.
+    For crypto (e.g., BTCUSD), tries formats: BTC-USD, BTCUSD, BTCUSD=X.
+    For forex (e.g., EURUSD), tries formats: EURUSD=X, EUR-USD, EURUSD.
     """
     with _yf_lock:
-        # Build list of ticker formats to try
+        # Build list of ticker formats to try, ordered by likelihood of success
         ticker_formats = [ticker]
-        
-        # For forex pairs (4-letter-4-letter format), try common variations
+
+        # For 6-letter alphabetic tickers, try common variations
         if len(ticker) == 6 and ticker.isalpha():
             base = ticker[:3]
             quote = ticker[3:]
-            ticker_formats.extend([
-                f"{base}{quote}=X",    # EURUSD=X
-                f"{base}-{quote}",     # EUR-USD
-            ])
-        
+
+            # Detect likely crypto pairs (quote = USD/USDT/USDC/BTC/ETH)
+            crypto_quotes = {"USD", "USDT", "USDC", "BTC", "ETH"}
+            if quote in crypto_quotes:
+                # Crypto on Yahoo Finance uses dash format: BTC-USD
+                ticker_formats = [
+                    f"{base}-{quote}",     # BTC-USD (yfinance crypto format)
+                    ticker,                # BTCUSD (fallback)
+                    f"{base}{quote}=X",   # BTCUSD=X (won't work for crypto but try anyway)
+                ]
+            else:
+                # Forex pairs on Yahoo Finance use =X suffix: EURUSD=X
+                ticker_formats = [
+                    f"{base}{quote}=X",    # EURUSD=X (yfinance forex format)
+                    f"{base}-{quote}",     # EUR-USD (alternative)
+                    ticker,                # EURUSD (fallback)
+                ]
+
         last_exc = None
         for fmt in ticker_formats:
             try:
@@ -533,29 +561,57 @@ async def _fetch_from_mt5(
 # Source 3: TwelveData (REST)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _twelvedata_symbol_formats(ticker: str) -> list[str]:
+    """Return ordered list of TwelveData symbol formats to try for *ticker*.
+
+    TwelveData expects:
+      - Crypto pairs: ``BTC/USD`` (slash form)
+      - Forex pairs: ``EUR/USD`` (slash form)
+      - Stocks: ``AAPL`` (plain)
+
+    For a 6-letter alphabetic ticker like ``BTCUSD`` or ``EURUSD`` we try the
+    slash form first, then the plain form. For anything else we just return
+    the ticker as-is.
+    """
+    if len(ticker) == 6 and ticker.isalpha():
+        base = ticker[:3]
+        quote = ticker[3:]
+        return [
+            f"{base}/{quote}",   # BTC/USD or EUR/USD (TwelveData canonical)
+            ticker,              # BTCUSD / EURUSD (fallback)
+        ]
+    return [ticker]
+
+
 async def _fetch_from_twelvedata(
     ticker: str, period: str, interval: str
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV from TwelveData. Raises ValueError on failure."""
+    """Fetch OHLCV from TwelveData. Raises ValueError on failure.
+
+    Tries multiple symbol formats (e.g. ``BTC/USD`` then ``BTCUSD``) until
+    one returns data, so callers can pass an MT5-style or yfinance-style
+    ticker without worrying about TwelveData's slash convention.
+    """
     td_interval = _INTERVAL_TO_TWELVE.get(interval)
     if td_interval is None:
         raise ValueError(f"TwelveData does not support interval '{interval}'")
 
     outputsize = _period_to_count(period, interval)
+    symbol_formats = _twelvedata_symbol_formats(ticker)
 
-    def _fetch() -> pd.DataFrame:
+    def _fetch_one(symbol: str) -> pd.DataFrame:
         try:
             from twelvedata import TDClient
             td = TDClient(apikey=TWELVEDATA_API_KEY)
             df = td.time_series(
-                symbol=ticker,
+                symbol=symbol,
                 interval=td_interval,
                 outputsize=outputsize,
                 order="ASC",
             ).as_pandas()
             if df is None or df.empty:
                 raise ValueError(
-                    f"TwelveData returned no data for '{ticker}' "
+                    f"TwelveData returned no data for '{symbol}' "
                     f"(period={period}, interval={interval})"
                 )
             return df
@@ -563,12 +619,24 @@ async def _fetch_from_twelvedata(
             # Re-raise as ValueError so the fallback chain handles it uniformly
             raise ValueError(str(exc)) from exc
 
-    try:
-        df = await asyncio.to_thread(_fetch)
-    except ValueError:
-        raise
-    except Exception as exc:
-        raise ValueError(f"TwelveData failed for '{ticker}': {exc}") from exc
+    last_exc: Exception | None = None
+    df: pd.DataFrame | None = None
+    for symbol in symbol_formats:
+        try:
+            df = await asyncio.to_thread(_fetch_one, symbol)
+            logger.debug("TwelveData succeeded with symbol: %s", symbol)
+            break
+        except ValueError as exc:
+            last_exc = exc
+            logger.debug("TwelveData symbol %s failed: %s", symbol, exc)
+            continue
+
+    if df is None:
+        assert last_exc is not None
+        raise ValueError(
+            f"TwelveData failed for '{ticker}' "
+            f"(tried formats: {', '.join(symbol_formats)}): {last_exc}"
+        ) from last_exc
 
     records: list[dict[str, Any]] = []
     for idx, row in df.iterrows():
