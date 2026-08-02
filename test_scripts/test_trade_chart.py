@@ -198,8 +198,8 @@ async def main() -> None:
     # finalized *inside* the running loop, avoiding shutdown-time cleanup
     # errors from anyio cancel-scope mismatches.
     try:
-        from mcp_server.data import _get_mt5_client
-        await _get_mt5_client().aclose()
+        from mcp_server.utils.mt5_mcp_server import get_mt5_client
+        await get_mt5_client().aclose()
     except Exception:
         pass
 

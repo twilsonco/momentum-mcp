@@ -12,10 +12,7 @@ Exposes as a single MCP tool: `pick_market`
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import os
 import random
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +24,12 @@ import pytz
 from mcp_server.charts import generate_chart as _generate_chart, ChartResult
 from mcp_server.calculate_trade_setup import calculate_trade_setups
 from mcp_server.mt5_position_sizer import calculate_mt5_position_size
+from mcp_server.utils.mt5_mcp_server import (
+    MT5_MCP_URL,
+    call_mt5_tool,
+    fetch_mt5_account_info,
+    fetch_mt5_symbol_info,
+)
 
 load_dotenv()
 
@@ -34,27 +37,11 @@ logger = logging.getLogger(__name__)
 
 TZ = "America/Denver"
 
-# MT5 MCP server URL (from environment)
-MT5_MCP_URL: str = os.getenv("MT5_MCP_URL", "").strip()
+ALLOWED_SYMBOL_TYPES = [
+    "Futures", "FX Crosses", "Energy", "Metals", "FM Majors", "Indices", "Cryptos"
+]
 
-# Symbol catalog (same as market_picker.py)
-SYMBOLS = {
-    "Crypto": [
-        "BCHUSD", "BITUSD", "BTCUSD", "DASHUSD", "EDOUSD", "EOSUSD", "ETCUSD",
-        "ETHUSD", "ETPUSD", "IOTAUSD", "LTCUSD", "NEOUSD", "OMGUSD", "SANUSD", 
-        "TRXUSD", "USDTUSD", "XMRUSD", "XRPUSD", "ZECUSD",
-    ],
-    "FX_majors": ["AUDUSD", "EURUSD", "GBPUSD", "NZDUSD", "USDCAD", "USDCHF", "USDJPY"],
-    "FX_minors": [
-        "AUDCAD", "AUDCHF", "AUDJPY", "AUDNZD", "CADCHF", "CADJPY", "CHFJPY",
-        "EURAUD", "EURCAD", "EURCHF", "EURGBP", "EURJPY", "EURNZD", "GBPAUD",
-        "GBPCAD", "GBPCHF", "GBPJPY", "GBPNZD", "NZDCAD", "NZDCHF", "NZDJPY",
-    ],
-    "Metals": ["XAGUSD", "XAUEUR", "XAUUSD", "XPTUSD"],
-    "Indices": ["AUS200", "ESP35", "EUSTX50", "FRA40", "GER30", "JPN225", "NAS100", "SPX500", "UK100", "US30"],
-    "Futures": ["DOLLAR"],
-    "Energies": ["UKOil", "USOil"],
-}
+ALLOWED_CRYPTOS = [r".*USD"]
 
 ALL_INTERVALS = ["1m", "2m", "5m", "15m", "30m", "60m", "90m",
     "1h", "1d", "5d", "1wk", "1mo", "3mo",]
@@ -349,6 +336,7 @@ def _is_market_open(symbol: str, now_utc: datetime) -> bool:
     Returns:
         True if the market is open, False otherwise.
     """
+    
     weekday = now_utc.weekday()  # Monday is 0, Sunday is 6
     hour = now_utc.hour
     minute = now_utc.minute
@@ -436,52 +424,37 @@ def _is_market_open(symbol: str, now_utc: datetime) -> bool:
 
 async def _get_open_position_symbols() -> set[str]:
     """Fetch all currently open MetaTrader positions and return their symbols.
-    
+
     Returns:
         Set of symbols with open positions (uppercase). Empty set if MT5 MCP unavailable
         or if an error occurs.
     """
-    if not MT5_MCP_URL:
-        logger.debug("MT5_MCP_URL not configured, no positions to exclude")
+
+    result = await call_mt5_tool("get_all_positions", {}, timeout=5.0)
+    if not result or not getattr(result, "content", None):
         return set()
-    
-    try:
-        from mcp_server.mt5_position_sizer import _get_mt5_client
-        
-        client = _get_mt5_client()
-        result = await asyncio.wait_for(
-            client.call_tool("get_all_positions", {}),
-            timeout=5.0,
-        )
-        
-        # Parse the CSV response — each row is: id, symbol, type, time, ...
-        symbols = set()
-        for content in result.content:
-            if hasattr(content, "text"):
-                lines = content.text.strip().split("\n")
-                if len(lines) <= 1:
+
+    # Parse the CSV response — each row is: id, symbol, type, time, ...
+    symbols = set()
+    for content in result.content:
+        if hasattr(content, "text"):
+            lines = content.text.strip().split("\n")
+            if len(lines) <= 1:
+                continue
+            # Skip header if present
+            for line in lines[1:]:
+                if not line.strip():
                     continue
-                # Skip header if present
-                for line in lines[1:]:
-                    if not line.strip():
-                        continue
-                    parts = line.split(",")
-                    if len(parts) >= 4:
-                        # Second column should be symbol
-                        symbol = parts[3].strip().upper()
-                        if symbol:
-                            symbols.add(symbol)
-                logger.debug(f"Found {len(symbols)} open position symbols: {symbols}")
-                return symbols
-        
-        return set()
-    
-    except asyncio.TimeoutError:
-        logger.warning("Timeout fetching open positions from MT5 MCP (5s)")
-        return set()
-    except Exception as exc:
-        logger.warning(f"Failed to fetch open positions: {exc}")
-        return set()
+                parts = line.split(",")
+                if len(parts) >= 4:
+                    # Second column should be symbol
+                    symbol = parts[3].strip().upper()
+                    if symbol:
+                        symbols.add(symbol)
+            logger.debug(f"Found {len(symbols)} open position symbols: {symbols}")
+            return symbols
+
+    return set()
 
 
 async def _get_margin_level() -> float | None:
@@ -491,49 +464,19 @@ async def _get_margin_level() -> float | None:
         Margin level as a percentage (equity / margin * 100), or None if
         MT5 MCP is unavailable or the value cannot be parsed.
     """
-    if not MT5_MCP_URL:
-        logger.debug("MT5_MCP_URL not configured, cannot fetch margin level")
+    account_info = await fetch_mt5_account_info(timeout=5.0)
+    if not isinstance(account_info, dict):
+        return None
+
+    margin_level = account_info.get("margin_level")
+    if margin_level is None:
+        logger.debug(f"Account info missing margin_level: {account_info}")
         return None
 
     try:
-        from mcp_server.mt5_position_sizer import _get_mt5_client
-
-        client = _get_mt5_client()
-        result = await asyncio.wait_for(
-            client.call_tool("get_account_info", {}),
-            timeout=5.0,
-        )
-
-        for content in result.content:
-            if hasattr(content, "text"):
-                text = content.text.strip()
-                try:
-                    account_info = json.loads(text)
-                except json.JSONDecodeError:
-                    logger.warning(f"Could not parse account info: {text}")
-                    continue
-
-                if not isinstance(account_info, dict):
-                    continue
-
-                margin_level = account_info.get("margin_level")
-                if margin_level is None:
-                    logger.debug(f"Account info missing margin_level: {account_info}")
-                    return None
-
-                try:
-                    return float(margin_level)
-                except (TypeError, ValueError):
-                    logger.warning(f"Invalid margin_level value: {margin_level!r}")
-                    return None
-
-        return None
-
-    except asyncio.TimeoutError:
-        logger.warning("Timeout fetching account info from MT5 MCP (5s)")
-        return None
-    except Exception as exc:
-        logger.warning(f"Failed to fetch margin level: {exc}")
+        return float(margin_level)
+    except (TypeError, ValueError):
+        logger.warning(f"Invalid margin_level value: {margin_level!r}")
         return None
 
 
@@ -646,50 +589,19 @@ async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
     Returns:
         True if symbol is valid and can be traded, False otherwise.
     """
-    if not MT5_MCP_URL:
-        logger.debug(f"MT5_MCP_URL not configured, cannot validate {symbol}")
-        return True, {}   # Assume valid if we can't check
-    
-    try:
-        from mcp_server.mt5_position_sizer import _get_mt5_client
-        
-        client = _get_mt5_client()
-        result = await asyncio.wait_for(
-            client.call_tool(
-                "get_symbol_info",
-                {"symbol_name": symbol},
-            ),
-            timeout=15.0,
-        )
-        
-        # If we got a response with content, assume the symbol is valid
-        if result and result.content:
-            for content in result.content:
-                if hasattr(content, "text") and content.text.strip():
-                    try:
-                        s = json.loads(content.text.strip())
-                        check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step", "spread", "volume_max", "volume_min"]
-                        missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
-                        if not missing_check_fields:
-                            logger.debug(f"Symbol {symbol} validated successfully")
-                            return True, s
-                        else:
-                            logger.warning(f"Symbol {symbol} validation failed: missing required fields: {missing_check_fields}")
-                            return False, s
-                    except json.JSONDecodeError:
-                        logger.warning(f"get_symbol_info returned non-JSON for {symbol}: {content.text.strip()[:200]}")
-                        return False, {}
-                    
-        
-        logger.warning(f"Symbol {symbol} validation returned empty response")
-        return False, {}
-    
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout validating symbol {symbol} (15s)")
-        return False, {}
-    except Exception as exc:
-        logger.warning(f"Failed to validate symbol {symbol}: {exc}")
-        return False, {}
+    s = await fetch_mt5_symbol_info(symbol, timeout=15.0)
+    if isinstance(s, dict) and s:
+        check_fields = ["ask", "bid", "trade_contract_size", "trade_tick_size", "trade_tick_value", "volume_step", "volume_max", "volume_min"]
+        missing_check_fields = [field for field in check_fields if field not in s or not s[field]]
+        if not missing_check_fields:
+            logger.debug(f"Symbol {symbol} validated successfully")
+            return True, s
+
+        logger.warning(f"Symbol {symbol} validation failed: missing required fields: {missing_check_fields}")
+        return False, s
+
+    logger.warning(f"Symbol {symbol} validation returned empty response")
+    return False, {}
 
 
 async def pick_market(
@@ -804,7 +716,8 @@ async def pick_market(
         is_valid, symbol_info = await _validate_symbol(symbol)
         if is_valid:
             trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info)
-            if "abort" in str(trade_setups).lower():
+            if "status" in trade_setups and "Abort" in trade_setups["status"]:
+                logger.info(f"Trade setups for {symbol} indicate abort: {trade_setups['status']}")
                 continue
             if generate_chart:
                 try:
@@ -815,19 +728,25 @@ async def pick_market(
             else:
                 chart_data = None
             
-            position_size_long = await calculate_mt5_position_size(symbol,
-                "long", 
-                trade_setups["long_buy_setup"]["entry"],
-                trade_setups["long_buy_setup"]["stop_loss"]
-            )
-            trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_percent": position_size_long.data["actual_risk_percent"]}
+            position_size_long = None
+            if "Abort" not in trade_setups["long_buy_setup"].get("status", ""):
+                position_size_long = await calculate_mt5_position_size(symbol,
+                    "long", 
+                    trade_setups["long_buy_setup"]["entry"],
+                    trade_setups["long_buy_setup"]["stop_loss"]
+                )
+                print(position_size_long)
+                trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_pct": position_size_long.data["actual_risk_pct"]}
             
-            position_size_short = await calculate_mt5_position_size(symbol, 
-                "short", 
-                trade_setups["short_sell_setup"]["entry"],
-                trade_setups["short_sell_setup"]["stop_loss"]
-            )
-            trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_percent": position_size_short.data["actual_risk_percent"]}
+            position_size_short = None
+            if "Abort" not in trade_setups["short_sell_setup"].get("status", ""):
+                position_size_short = await calculate_mt5_position_size(symbol, 
+                    "short", 
+                    trade_setups["short_sell_setup"]["entry"],
+                    trade_setups["short_sell_setup"]["stop_loss"]
+                )
+                print(position_size_short)
+                trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_pct": position_size_short.data["actual_risk_pct"]}
             print(trade_setups)
             
             picked_symbol = symbol

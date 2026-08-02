@@ -11,100 +11,17 @@ against live MT5 data, reporting any discrepancies.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import math
 import time
 from typing import Any
 
-from mcp_server.data import MT5_MCP_URL, _get_mt5_client
 from mcp_server.schema import SignalResult
+from mcp_server.utils.mt5_mcp_server import (
+    fetch_mt5_account_info,
+    fetch_mt5_symbol_info,
+)
 
 logger = logging.getLogger(__name__)
-
-
-async def _fetch_mt5_account_info() -> dict[str, Any] | None:
-    """Fetch account info from MT5 MCP server.
-    
-    Returns:
-        Dict with account fields (balance, equity, free_margin, margin_level, leverage, currency)
-        or None if unavailable.
-    """
-    if not MT5_MCP_URL:
-        return None
-    
-    try:
-        client = _get_mt5_client()
-        result = await asyncio.wait_for(
-            client.call_tool("get_account_info", {}),
-            timeout=5.0
-        )
-        
-        for content in result.content:
-            if hasattr(content, "text"):
-                text = content.text.strip()
-                try:
-                    account_info = json.loads(text)
-                    if isinstance(account_info, dict) and "balance" in account_info:
-                        return account_info
-                except json.JSONDecodeError:
-                    logger.warning(f"Could not parse account info: {text}")
-        return None
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout fetching account info from MT5 MCP (5s)")
-        return None
-    except Exception as e:
-        logger.warning(f"Could not fetch account info from MT5: {e}")
-        return None
-
-
-async def _fetch_mt5_symbol_info(symbol: str) -> dict[str, Any] | None:
-    """Fetch symbol info (tick size, tick value, contract size, volume step) and pricing from MT5 MCP server.
-    
-    Args:
-        symbol: MT5 symbol name (e.g., "XAUUSD", "EURUSD").
-        
-    Returns:
-        Dict with full symbol info (trade_tick_size, trade_tick_value, trade_contract_size,
-        volume_min, volume_max, volume_step, digits, point, etc.) and price info,
-        or None if unavailable.
-    """
-    if not MT5_MCP_URL:
-        return None
-    
-    try:
-        client = _get_mt5_client()
-        
-        # Get full symbol info (tick size, tick value, contract size, volume step, etc.)
-        symbol_info_raw = None
-        try:
-            info_result = await asyncio.wait_for(
-                client.call_tool(
-                    "get_symbol_info",
-                    {"symbol_name": symbol},
-                ),
-                timeout=15.0
-            )
-            for content in info_result.content:
-                if hasattr(content, "text"):
-                    try:
-                        symbol_info_raw = json.loads(content.text.strip())
-                    except json.JSONDecodeError:
-                        # Fallback: try to parse as plain text representation of a dict
-                        text = content.text.strip()
-                        if text:
-                            logger.debug(f"get_symbol_info returned non-JSON for {symbol}: {text[:200]}")
-        except asyncio.TimeoutError:
-            logger.warning(f"Timeout fetching symbol info for {symbol} from MT5 MCP (3s)")
-        
-        if symbol_info_raw is not None and isinstance(symbol_info_raw, dict):
-            return symbol_info_raw
-        
-        return None
-    except Exception as e:
-        logger.warning(f"Could not fetch symbol info for {symbol} from MT5: {e}")
-        return None
 
 
 async def calculate_mt5_position_size(
@@ -143,19 +60,20 @@ async def calculate_mt5_position_size(
     try:
         symbol = symbol.strip().upper()
         
-        if not MT5_MCP_URL:
-            return SignalResult.error_msg(
-                "MetaTrader MCP URL not configured. Cannot fetch MT5 data."
-            )
-        
         # Validate stop_price
         if stop_price <= 0:
             return SignalResult.error_msg(f"stop_price must be positive, got {stop_price}")
         
         # Fetch MT5 data
         fetch_start = time.time()
-        account_info = await _fetch_mt5_account_info()
-        symbol_info = await _fetch_mt5_symbol_info(symbol)
+        account_info = await fetch_mt5_account_info(timeout=5.0)
+        symbol_info = await fetch_mt5_symbol_info(symbol, timeout=15.0)
+        
+        if not account_info or not symbol_info:
+            return SignalResult.error_msg(
+                "Failed to fetch MT5 data. MetaTrader MCP not configured or not responding."
+            )
+        
         fetch_elapsed = time.time() - fetch_start
         logger.info(f"MT5 data fetch completed in {fetch_elapsed:.2f}s (account: {bool(account_info)}, symbol: {bool(symbol_info)})")
         

@@ -27,6 +27,7 @@ from typing import Any
 import pandas as pd
 import yfinance as yf
 from dotenv import load_dotenv
+from mcp_server.utils.mt5_mcp_server import MT5_MCP_URL, call_mt5_tool, get_mt5_client
 
 load_dotenv()
 
@@ -49,7 +50,6 @@ VALID_INTERVALS = {
 
 # ── Source Configuration ──────────────────────────────────────────────────────
 
-MT5_MCP_URL: str = os.getenv("MT5_MCP_URL", "").strip()
 TWELVEDATA_API_KEY: str = os.getenv("TWELVEDATA_API_KEY", "").strip()
 
 # Interval mapping: yfinance → MetaTrader MCP timeframe codes
@@ -338,159 +338,6 @@ def _fetch_from_yfinance(
 # Source 2: MetaTrader MCP (SSE)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class _MT5Client:
-    """Lazy singleton MCP client for the MetaTrader server.
-
-    Keeps a persistent SSE connection alive across calls.  Automatically
-    reconnects on failure.
-    """
-
-    def __init__(self) -> None:
-        self._cm: Any = None  # sse_client context manager
-        self._session: Any = None
-        self._lock = asyncio.Lock()
-
-    async def _ensure_connected(self) -> Any:
-        """Return a live ClientSession, connecting if needed."""
-        if self._session is not None:
-            return self._session
-        async with self._lock:
-            if self._session is not None:
-                return self._session
-            from mcp import ClientSession
-            from mcp.client.sse import sse_client
-            import asyncio
-
-            logger.info("MT5 MCP: connecting to %s", MT5_MCP_URL)
-            try:
-                self._cm = sse_client(MT5_MCP_URL)
-                # Add 10s timeout to connection establishment
-                read, write = await asyncio.wait_for(
-                    self._cm.__aenter__(),
-                    timeout=10.0
-                )
-                self._session = ClientSession(read, write)
-                await asyncio.wait_for(
-                    self._session.__aenter__(),
-                    timeout=10.0
-                )
-                await asyncio.wait_for(
-                    self._session.initialize(),
-                    timeout=10.0
-                )
-                logger.info("MT5 MCP: connected and initialized")
-                return self._session
-            except asyncio.TimeoutError:
-                logger.error("MT5 MCP connection timeout (10s)")
-                self._session = None
-                raise RuntimeError("MT5 MCP connection timeout")
-
-    async def _disconnect(self) -> None:
-        """Tear down the current connection (if any).
-
-        Robust against:
-        - Python 3.14+ anyio cancel scope mismatches (exit from a different
-          task than the one that entered) — these are harmless cleanup
-          artifacts from the SSE client's internal task groups.
-        - ``__aexit__`` hangs — each cleanup step has a 2s timeout.
-        - Already-disconnected state — no-op if ``_session``/``_cm`` are None.
-        - Closed event loop — caught and logged.
-
-        Always resets ``_session`` and ``_cm`` to ``None`` so the next call
-        reconnects from scratch.
-        """
-        # Snapshot state so we can reset atomically even if cleanup raises
-        session = self._session
-        cm = self._cm
-        self._session = None
-        self._cm = None
-
-        # 1. Tear down the ClientSession first (inner scope)
-        if session is not None:
-            try:
-                await asyncio.wait_for(
-                    session.__aexit__(None, None, None),
-                    timeout=2.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("MT5 MCP: session.__aexit__ timed out (2s)")
-            except RuntimeError as e:
-                # Python 3.14+ anyio cancel scope mismatch — harmless cleanup
-                if "cancel scope" in str(e):
-                    logger.debug("MT5 MCP: suppressed cancel scope error during session cleanup")
-                else:
-                    logger.warning("MT5 MCP: session cleanup RuntimeError: %s", e)
-            except Exception as e:
-                logger.warning("MT5 MCP: session cleanup error: %s", e)
-
-        # 2. Tear down the sse_client context manager (outer scope)
-        if cm is not None:
-            try:
-                await asyncio.wait_for(
-                    cm.__aexit__(None, None, None),
-                    timeout=2.0,
-                )
-            except asyncio.TimeoutError:
-                logger.warning("MT5 MCP: sse_client.__aexit__ timed out (2s)")
-            except RuntimeError as e:
-                if "cancel scope" in str(e):
-                    logger.debug("MT5 MCP: suppressed cancel scope error during sse_client cleanup")
-                else:
-                    logger.warning("MT5 MCP: sse_client cleanup RuntimeError: %s", e)
-            except Exception as e:
-                logger.warning("MT5 MCP: sse_client cleanup error: %s", e)
-
-    async def call_tool(self, name: str, args: dict[str, Any]) -> Any:
-        """Call a tool with one automatic reconnect on failure.
-
-        ``_disconnect()`` is fully robust (timeouts, cancel-scope suppression,
-        atomic state reset) so we don't need a try/except wrapper here.
-        """
-        import asyncio
-        last_exc: Exception | None = None
-        for attempt in range(2):
-            try:
-                session = await self._ensure_connected()
-                # Add timeout to the tool call itself
-                result = await asyncio.wait_for(
-                    session.call_tool(name, args),
-                    timeout=60.0  # 60s per tool call
-                )
-                return result
-            except asyncio.TimeoutError:
-                last_exc = TimeoutError(f"MT5 MCP tool '{name}' timeout (60s)")
-                logger.warning(
-                    "MT5 MCP call '%s' timeout (attempt %d)",
-                    name, attempt + 1,
-                )
-                # Disconnect on failure — _disconnect() handles its own errors
-                await self._disconnect()
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "MT5 MCP call '%s' failed (attempt %d): %s",
-                    name, attempt + 1, exc,
-                )
-                # Disconnect on failure — _disconnect() handles its own errors
-                await self._disconnect()
-        assert last_exc is not None
-        raise last_exc
-
-    async def aclose(self) -> None:
-        """Cleanly close the connection."""
-        await self._disconnect()
-
-
-_mt5_client: _MT5Client | None = None
-
-
-def _get_mt5_client() -> _MT5Client:
-    """Return the singleton MT5 client."""
-    global _mt5_client
-    if _mt5_client is None:
-        _mt5_client = _MT5Client()
-    return _mt5_client
-
 
 async def _fetch_from_mt5(
     ticker: str, period: str, interval: str
@@ -501,10 +348,9 @@ async def _fetch_from_mt5(
         raise ValueError(f"MetaTrader MCP does not support interval '{interval}'")
 
     count = _period_to_count(period, interval)
-    client = _get_mt5_client()
 
     try:
-        result = await client.call_tool(
+        result = await call_mt5_tool(
             "get_candles_latest",
             {"symbol_name": ticker, "timeframe": mt5_tf, "count": count},
         )

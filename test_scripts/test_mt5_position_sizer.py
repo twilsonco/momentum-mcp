@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # Import after path setup
 from mcp_server.mt5_position_sizer import calculate_mt5_position_size
-from mcp_server.data import MT5_MCP_URL
+from mcp_server.utils.mt5_mcp_server import MT5_MCP_URL, get_mt5_client
 
 # Suppress verbose httpx logging
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -100,10 +100,10 @@ async def test_with_provided_entry():
     logger.info("")
     
     result = await calculate_mt5_position_size(
-        symbol="ETHBTC",
+        symbol="EURUSD",
         position_direction="long",
-        entry_price=0.02915,  # Provided — should use this
-        stop_price=0.028,
+        entry_price=1.15459,  # Provided — should use this
+        stop_price=1.150,
         risk_pct=1.0
     )
     
@@ -125,14 +125,14 @@ async def test_short_position():
     logger.info("\n" + "=" * 80)
     logger.info("TEST 2: Position Sizer with Short Position")
     logger.info("=" * 80)
-    logger.info("Testing: entry_price=0.028 for short (entry < stop)")
+    logger.info("Testing: entry_price=1.145 for short (entry < stop)")
     logger.info("")
     
     result = await calculate_mt5_position_size(
-        symbol="ETHBTC",
+        symbol="EURUSD",
         position_direction="short",
-        entry_price=0.028,  # Provided — should use this
-        stop_price=0.02915,  # Stop above entry for short
+        entry_price=1.15459,  # Provided — should use this
+        stop_price=1.16,  # Stop above entry for short
         risk_pct=2.0
     )
     
@@ -209,8 +209,7 @@ async def main():
     # finalized *inside* the running loop, avoiding shutdown-time cleanup
     # errors from anyio cancel-scope mismatches.
     try:
-        from mcp_server.data import _get_mt5_client
-        await _get_mt5_client().aclose()
+        await get_mt5_client().aclose()
     except Exception:
         pass
 

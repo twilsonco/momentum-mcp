@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 from asyncio.log import logger
-import asyncio
-import json
-import os
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -11,79 +8,24 @@ from typing import Any
 from datetime import timedelta
 
 from mcp_server.data import get_historical_data
-
-MT5_MCP_URL = os.environ.get("MT5_MCP_URL", None)
+from mcp_server.technicals import _extract_last
+from mcp_server.utils.mt5_mcp_server import fetch_mt5_symbol_info
 
 async def _get_symbol_info(symbol: str) -> dict:
     """Validate that a symbol can be traded by calling get_symbol_info.
-    
+
     Returns:
         Dictionary containing symbol info if valid, empty dict otherwise.
     """
-    if not MT5_MCP_URL:
-        logger.debug(f"MT5_MCP_URL not configured, cannot validate {symbol}")
-        return {}   # Assume valid if we can't check
+    symbol_info = await fetch_mt5_symbol_info(symbol, timeout=15.0)
+    if isinstance(symbol_info, dict) and symbol_info:
+        logger.debug(f"Symbol {symbol} validated successfully")
+        return symbol_info
 
-    try:
-        from mcp_server.mt5_position_sizer import _get_mt5_client
-        
-        client = _get_mt5_client()
-        result = await asyncio.wait_for(
-            client.call_tool(
-                "get_symbol_info",
-                {"symbol_name": symbol},
-            ),
-            timeout=15.0,
-        )
+    logger.warning(f"Symbol {symbol} validation returned empty response")
+    return {}
 
-        # If we got a response with content, assume the symbol is valid
-        if result and result.content:
-            for content in result.content:
-                if hasattr(content, "text") and content.text.strip():
-                    try:
-                        s = json.loads(content.text.strip())
-                        logger.debug(f"Symbol {symbol} validated successfully")
-                        return s
-                    except json.JSONDecodeError:
-                        logger.warning(f"get_symbol_info returned non-JSON for {symbol}: {content.text.strip()[:200]}")
-                        return {}
-
-        logger.warning(f"Symbol {symbol} validation returned empty response")
-        return {}
-
-    except asyncio.TimeoutError:
-        logger.warning(f"Timeout validating symbol {symbol} (15s)")
-        return {}
-    except Exception as exc:
-        logger.warning(f"Failed to validate symbol {symbol}: {exc}")
-        return {}
-
-def _extract_last(series: pd.Series | None) -> float | None:
-    """Get the last non-NaN value from a series, rounded."""
-    return _extract_at(series, -1)
-
-
-def _extract_at(series: pd.Series | None, idx: int = -1) -> float | None:
-    """Get the value at a specific index from a series, rounded.
-
-    Args:
-        series: A pandas Series (e.g., RSI values over time).
-        idx: The index position (negative for from-end, e.g. -2 = second-to-last).
-
-    Returns:
-        Rounded float value, or None if unavailable.
-    """
-    if series is None or series.empty:
-        return None
-    try:
-        val = series.iloc[idx]
-        if pd.isna(val):
-            return None
-        return round(float(val), 4)
-    except (IndexError, KeyError):
-        return None
-
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.5, digits: int = 5):
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 1.0, digits: int = 5):
     """
     Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
     
@@ -113,6 +55,7 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
 
     # Fail if we don't have at least 24 hours of history
     if oldest_timestamp > time_24h_ago:
+        logger.warning(f"Insufficient data: oldest_timestamp={oldest_timestamp}, last_timestamp={last_timestamp}")
         return {
             "status": "Abort",
             "reason": (
@@ -131,6 +74,7 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     window_last_48 = df.loc[time_48h_ago:last_timestamp]
 
     if window_24_to_48.empty or window_last_48.empty:
+        logger.warning(f"Insufficient data for lookback windows. window_24_to_48 empty: {window_24_to_48.empty}, window_last_48 empty: {window_last_48.empty}, last_timestamp: {last_timestamp}, oldest_timestamp: {oldest_timestamp}")
         return {"status": "Abort", "reason": "Insufficient data for lookback windows."}
 
     # 2. Determine Stop Loss (SL)
@@ -141,10 +85,18 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         
         logger.info(f"Proposed SL: {proposed_sl}, SL Distance: {sl_distance}, Current ATR: {current_atr}")
         
+        # Guard: for a long trade, SL must be below entry. If the swing-based
+        # SL ended up above entry (price has dropped below the prior swing low),
+        # fall back to a minimum ATR-based SL distance.
+        if sl_distance < (1.5 * current_atr):
+            proposed_sl = entry_price - (1.5 * current_atr)
+            sl_distance = 1.5 * current_atr
+            logger.info(f"SL was above entry; using minimum ATR-based SL. Proposed SL: {proposed_sl}, SL Distance: {sl_distance}")
+        
         # Constraint: SL distance must never exceed 3 * ATR
         if sl_distance > (3 * current_atr):
             proposed_sl = entry_price - (3 * current_atr)
-            sl_distance = entry_price - proposed_sl
+            sl_distance = 3 * current_atr
             
     elif direction.lower() == 'short':
         swing_high = window_24_to_48['High'].max()
@@ -153,10 +105,18 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         
         logger.info(f"Proposed SL: {proposed_sl}, SL Distance: {sl_distance}, Current ATR: {current_atr}")
         
+        # Guard: for a short trade, SL must be above entry. If the swing-based
+        # SL ended up below entry (price has risen above the prior swing high),
+        # fall back to a minimum ATR-based SL distance.
+        if sl_distance < (1.5 * current_atr):
+            proposed_sl = entry_price + (1.5 * current_atr)
+            sl_distance = 1.5 * current_atr
+            logger.info(f"SL was below entry; using minimum ATR-based SL. Proposed SL: {proposed_sl}, SL Distance: {sl_distance}")
+        
         # Constraint: SL distance must never exceed 3 * ATR
         if sl_distance > (3 * current_atr):
             proposed_sl = entry_price + (3 * current_atr)
-            sl_distance = proposed_sl - entry_price
+            sl_distance = 3 * current_atr
 
     else:
         raise ValueError("Direction must be 'long' or 'short'")
@@ -194,8 +154,9 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         final_tp = entry_price - (sl_distance * target_rr)
     
     if final_tp <= 0 or proposed_sl <= 0:
+        logger.warning(f"Invalid final TP ({final_tp}) or proposed SL ({proposed_sl})")
         return {
-            "status": "Abort",
+            "status": f"Abort: Do not open {direction} position",
             "reason": f"Invalid final TP ({final_tp}) or proposed SL ({proposed_sl})"
         }
     
@@ -204,8 +165,9 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     # 5. Check Spread Limit
     # Spread must be strictly less than `max_spread_factor_of_sl_dist` of the SL distance
     if spread >= (max_spread_factor_of_sl_dist * sl_distance):
+        logger.warning(f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})")
         return {
-            "status": "Abort", 
+            "status": f"Abort: Do not open {direction} position",
             "reason": f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})"
         }
 
@@ -222,8 +184,6 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
 
 
 async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None) -> dict[str, Any]:
-    if not MT5_MCP_URL:
-        raise ValueError("MetaTrader MCP server not configured")
     
     ticker = ticker.strip().upper()
     
@@ -237,22 +197,15 @@ async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol
     )
     if symbol_info is None:
         symbol_info = await _get_symbol_info(ticker)
+    
+    if symbol_info is None:
+        raise ValueError(f"Failed to fetch symbol info for {ticker}")
 
     # Validate symbol info
     required_fields = ["ask", "bid", "digits"]
     if not symbol_info or any(field not in symbol_info or not symbol_info[field] for field in required_fields):
         raise ValueError(f"Symbol {ticker} is missing required fields: {required_fields}")
     
-    # Disconnect MT5 client after data fetch to prevent Python 3.14
-    # anyio cancel scope errors during FastMCP response serialization.
-    # Defense-in-depth: also done in server.py tool wrapper, but doing it
-    # here ensures the connection is released as soon as data is in hand.
-    try:
-        from mcp_server.data import _get_mt5_client
-        await _get_mt5_client()._disconnect()
-    except Exception:
-        pass  # Ignore cleanup errors — client may not be connected
-
     if len(records) < 5:
         raise ValueError(
             f"Not enough data to chart '{ticker}': got {len(records)} bars."
@@ -285,12 +238,15 @@ async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol
     
     # Calculate long setup
     logger.info(f"Calculating long setup for {ticker}")
-    long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, max_spread_factor_of_sl_dist=0.25, digits=symbol_info["digits"])
+    long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, digits=symbol_info["digits"])
     ret["long_buy_setup"] = long_setup
     
     # Calculate short setup
     logger.info(f"Calculating short setup for {ticker}")
-    short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, max_spread_factor_of_sl_dist=0.25, digits=symbol_info["digits"])
+    short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, digits=symbol_info["digits"])
     ret["short_sell_setup"] = short_setup
+    
+    if all("Abort" in setup.get("status", "") for setup in (long_setup, short_setup)):
+        ret = {"status": "Abort: Do not open any position"}
 
     return ret
