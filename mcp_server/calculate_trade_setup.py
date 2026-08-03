@@ -5,8 +5,6 @@ import pandas as pd
 import pandas_ta as ta
 import numpy as np
 from typing import Any
-from datetime import timedelta
-
 from mcp_server.data import get_historical_data
 from mcp_server.technicals import _extract_last
 from mcp_server.utils.mt5_mcp_server import fetch_mt5_symbol_info
@@ -46,35 +44,49 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     current_atr = _extract_last(ta.atr(high, low, close, length=14))
     last_timestamp = df.index[-1]
     
-    # Define time windows based on available data.
-    # We prefer a 48-hour lookback for the swing low/high, but will accept
-    # as little as 24 hours of history. Less than 24h → abort.
-    oldest_timestamp = df.index[0]
-    time_24h_ago = last_timestamp - timedelta(hours=24)
-    time_48h_ago = last_timestamp - timedelta(hours=48)
+    # Define bar-based windows based on inferred interval.
+    # We prefer a 48-bar lookback for the swing low/high, but will accept
+    # as little as 24 bars of history. Less than 24 bars → abort.
+    # Using bar-based windows (rather than time-based) avoids issues with
+    # markets that close on weekends/holidays, where the actual time gap
+    # can be much larger than the number of bars available.
 
-    # Fail if we don't have at least 24 hours of history
-    if oldest_timestamp > time_24h_ago:
-        logger.warning(f"Insufficient data: oldest_timestamp={oldest_timestamp}, last_timestamp={last_timestamp}")
+    # Infer the typical bar interval from the DataFrame index. The median
+    # is robust to weekend/holiday gaps because most consecutive bars are
+    # the regular interval during trading hours.
+    if len(df) >= 2:
+        deltas = df.index.to_series().diff().dropna()
+        bar_interval = deltas.median()
+    else:
+        bar_interval = pd.Timedelta(hours=1)  # fallback
+
+    bars_per_24h = max(1, int(pd.Timedelta(hours=24) / bar_interval))
+    bars_per_48h = max(1, int(pd.Timedelta(hours=48) / bar_interval))
+
+    # Fail if we don't have at least 24 hours worth of bars
+    if len(df) < bars_per_24h:
+        logger.warning(f"Insufficient data: len(df)={len(df)}, bars_per_24h={bars_per_24h}, bar_interval={bar_interval}")
         return {
             "status": "Abort",
             "reason": (
                 f"Insufficient data: less than 24 hours of history available "
-                f"(oldest bar is {oldest_timestamp}, last bar is {last_timestamp})."
+                f"({len(df)} bars, need at least {bars_per_24h} for interval {bar_interval})."
             ),
         }
 
-    # Swing window: prefer starting 48h back, but extend to oldest data
-    # if we don't have a full 48 hours of history.
-    swing_window_start = max(time_48h_ago, oldest_timestamp)
-    window_24_to_48 = df.loc[swing_window_start:time_24h_ago]
+    # Swing window: prefer the 48h-to-24h slice, but extend back to the
+    # oldest bar if we don't have a full 48h of bars.
+    swing_start_idx = max(0, len(df) - bars_per_48h)
+    swing_end_idx = len(df) - bars_per_24h
+    window_24_to_48 = df.iloc[swing_start_idx:swing_end_idx]
 
-    # Barrier window: last 48h (naturally handles < 48h case since there
-    # simply won't be any data before the oldest bar).
-    window_last_48 = df.loc[time_48h_ago:last_timestamp]
+    # Barrier window: last 48h worth of bars (naturally handles < 48h case
+    # by capping at the available bar count).
+    barrier_bars_count = min(bars_per_48h, len(df))
+    window_last_48 = df.iloc[len(df) - barrier_bars_count:]
 
     if window_24_to_48.empty or window_last_48.empty:
-        logger.warning(f"Insufficient data for lookback windows. window_24_to_48 empty: {window_24_to_48.empty}, window_last_48 empty: {window_last_48.empty}, last_timestamp: {last_timestamp}, oldest_timestamp: {oldest_timestamp}")
+        logger.warning(f"Insufficient data for lookback windows. window_24_to_48 empty: {window_24_to_48.empty}, window_last_48 empty: {window_last_48.empty}, len(df)={len(df)}, bars_per_24h={bars_per_24h}, bars_per_48h={bars_per_48h}")
         return {"status": "Abort", "reason": "Insufficient data for lookback windows."}
 
     # 2. Determine Stop Loss (SL)

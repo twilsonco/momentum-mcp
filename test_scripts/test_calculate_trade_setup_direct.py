@@ -40,7 +40,7 @@ logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 from mcp_server.calculate_trade_setup import calculate_trade_setups
 
-TICKER = "BTCUSD"
+TICKER = "EURUSD"
 PERIOD = "1mo"
 INTERVAL = "1h"
 
