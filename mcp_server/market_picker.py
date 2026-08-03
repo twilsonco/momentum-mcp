@@ -12,8 +12,10 @@ Exposes as a single MCP tool: `pick_market`
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import random
+import re
 from datetime import datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -37,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 TZ = "America/Denver"
 
-ALLOWED_SYMBOL_TYPES = [
+ALLOWED_SYMBOL_MARKETS = [
     "Futures", "FX Crosses", "Energy", "Metals", "FM Majors", "Indices", "Cryptos"
 ]
 
@@ -326,16 +328,20 @@ def _get_trading_sessions(now_utc: datetime) -> str:
     return " and ".join(active_sessions)
 
 
-def _is_market_open(symbol: str, now_utc: datetime) -> bool:
+def _is_market_open(symbol: str, market: str, now_utc: datetime) -> bool:
     """Check if a specific market/symbol is open at the given UTC time.
-    
+
     Args:
         symbol: The trading symbol (e.g., "EURUSD", "AUS200", "DOLLAR")
+        market: The market category (e.g., "Indices", "Cryptos", "FX Crosses")
         now_utc: Current UTC time
-    
+
     Returns:
         True if the market is open, False otherwise.
     """
+    # Crypto markets are 24/7 and should always be considered open
+    if market == "Cryptos":
+        return True
     
     weekday = now_utc.weekday()  # Monday is 0, Sunday is 6
     hour = now_utc.hour
@@ -405,10 +411,7 @@ def _is_market_open(symbol: str, now_utc: datetime) -> bool:
             
             return True
     
-    # Fallback for symbols not in MARKET_HOURS (Forex, Crypto, Metals)
-    # Crypto markets are 24/7 and should always be considered open
-    if symbol in SYMBOLS.get("Crypto", []):
-        return True
+    # Fallback for symbols not in MARKET_HOURS (Forex, Metals)
 
     # Global Weekend Closure: Friday 21:00 UTC -> Sunday 21:00 UTC
     if (weekday == 4 and hour >= 21) or (weekday == 5) or (weekday == 6 and hour < 21):
@@ -478,6 +481,77 @@ async def _get_margin_level() -> float | None:
     except (TypeError, ValueError):
         logger.warning(f"Invalid margin_level value: {margin_level!r}")
         return None
+
+
+_symbols_cache: dict[str, list[str]] | None = None
+
+
+async def _fetch_mt5_symbols(timeout: float = 30.0) -> dict[str, list[str]] | None:
+    """Fetch all available symbols from MT5 MCP and organize by market.
+
+    Parses the market\\symbol format returned by get_symbols(fields=["path"]),
+    filters by ALLOWED_SYMBOL_MARKETS and ALLOWED_CRYPTOS, and returns
+    a dict with market names as keys and lists of symbols as values.
+
+    Returns:
+        Dict mapping market names to lists of symbols, or None on failure.
+        Example: {"FX Crosses": ["EURUSD", "GBPUSD"], "Cryptos": ["BTCUSD", "ETHUSD"]}
+    """
+    global _symbols_cache
+
+    if _symbols_cache is not None:
+        return _symbols_cache
+
+    result = await call_mt5_tool("get_symbols", {"fields": ["path"]}, timeout=timeout)
+    if not result or not getattr(result, "content", None):
+        logger.warning("MT5 MCP get_symbols returned no content")
+        return None
+
+    symbols_by_market: dict[str, list[str]] = {}
+    total_parsed = 0
+    total_filtered = 0
+    
+    for content in result.content:
+        text = getattr(content, "text", "")
+        if not text or not text.strip():
+            continue
+        
+        # Parse "Market\\Symbol" format
+        parts = text.strip().split("\\", 1)
+        if len(parts) != 2:
+            logger.debug(f"Unexpected symbol format (not Market\\Symbol): {text}")
+            continue
+        
+        market = parts[0].strip()
+        symbol = parts[1].strip()
+        total_parsed += 1
+        
+        # Filter by allowed markets
+        if market not in ALLOWED_SYMBOL_MARKETS:
+            logger.debug(f"Symbol {symbol} market '{market}' not in allowed markets")
+            continue
+        
+        # For Cryptos, apply regex filter
+        if market == "Cryptos":
+            if not any(re.match(pattern, symbol) for pattern in ALLOWED_CRYPTOS):
+                logger.debug(f"Crypto symbol {symbol} does not match allowed patterns")
+                continue
+        
+        total_filtered += 1
+        if market not in symbols_by_market:
+            symbols_by_market[market] = []
+        symbols_by_market[market].append(symbol)
+    
+    if not symbols_by_market:
+        logger.warning(f"No symbols available after filtering (parsed: {total_parsed}, passed filter: {total_filtered})")
+        return None
+    
+    logger.info(f"Fetched {total_parsed} symbols, filtered to {total_filtered} across {len(symbols_by_market)} markets")
+    for market, syms in symbols_by_market.items():
+        logger.info(f"  {market}: {len(syms)} symbols")
+    
+    _symbols_cache = symbols_by_market
+    return _symbols_cache
 
 
 async def _validate_symbol(symbol: str) -> tuple[bool, dict]:
@@ -687,80 +761,96 @@ async def pick_market(
                 "Could not fetch margin level; proceeding without margin check"
             )
     
-    # Step 3: Build available symbols list (only from open markets)
-    available_symbols = []
-    for category, symbols in SYMBOLS.items():
-        for sym in symbols:
-            if sym not in open_symbols and _is_market_open(sym, now_utc):
-                available_symbols.append(sym)
+    # Step 3: Fetch all available symbols from MT5 MCP, organized by market and filtered
+    symbols_by_market = await _fetch_mt5_symbols()
+    if not symbols_by_market:
+        msg = "Failed to fetch symbols from MT5 MCP; Abort immediately"
+        logger.error(msg)
+        return {"error": msg}
+
+    # Step 4: Build available symbols list from all markets, excluding open positions
+    # Structure: [(market, symbol), ...]
+    available_candidates: list[tuple[str, str]] = []
+    for market, symbols in symbols_by_market.items():
+        for symbol in symbols:
+            if symbol not in open_symbols:
+                available_candidates.append((market, symbol))
     
-    if not available_symbols:
-        msg = "No open markets available or all open symbols are excluded; Abort immediately"
+    if not available_candidates:
+        msg = "All symbols are excluded (open positions or not tradeable); Abort immediately"
         logger.warning(msg)
         return {"error": msg}
     
-    logger.debug(f"Available symbols for trading: {len(available_symbols)}")
+    logger.debug(f"Available market/symbol candidates for trading: {len(available_candidates)}")
     
-    # Step 4: Get random interval and associated timeframe    
+    # Step 5: Get random interval and associated timeframe
     valid_intervals = [i for i in intervals if i in ALL_INTERVALS]
     if not valid_intervals:
         valid_intervals = INTERVALS
     interval = random.choice(valid_intervals)
     timeframe = _get_historical_timeframe(interval)
-    
-    # Step 5: Pick a symbol and validate it (with retry)
-    random.shuffle(available_symbols)  # Randomize the list
+
+    # Step 6: Pick a symbol and validate it (with retry)
+    random.shuffle(available_candidates)  # Randomize the list
     picked_symbol = None
+    picked_market = None
     
-    for symbol in available_symbols:
+    for market, symbol in available_candidates:
+        # Check if market is open
+        if not _is_market_open(symbol, market, now_utc):
+            logger.debug(f"Market {market} is closed, skipping {symbol}")
+            continue
+                
         is_valid, symbol_info = await _validate_symbol(symbol)
-        if is_valid:
-            trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info)
-            if "status" in trade_setups and "Abort" in trade_setups["status"]:
-                logger.info(f"Trade setups for {symbol} indicate abort: {trade_setups['status']}")
-                continue
-            if generate_chart:
-                try:
-                    chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1])
-                except Exception as e:
-                    logger.error(f"Failed to generate chart for {symbol}: {e}")
-                    continue
-            else:
-                chart_data = None
-            
-            position_size_long = None
-            if "Abort" not in trade_setups["long_buy_setup"].get("status", ""):
-                position_size_long = await calculate_mt5_position_size(symbol,
-                    "long", 
-                    trade_setups["long_buy_setup"]["entry"],
-                    trade_setups["long_buy_setup"]["stop_loss"]
-                )
-                print(position_size_long)
-                trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_pct": position_size_long.data["actual_risk_pct"]}
-            
-            position_size_short = None
-            if "Abort" not in trade_setups["short_sell_setup"].get("status", ""):
-                position_size_short = await calculate_mt5_position_size(symbol, 
-                    "short", 
-                    trade_setups["short_sell_setup"]["entry"],
-                    trade_setups["short_sell_setup"]["stop_loss"]
-                )
-                print(position_size_short)
-                trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_pct": position_size_short.data["actual_risk_pct"]}
-            print(trade_setups)
-            
-            picked_symbol = symbol
-            picked_market = next((cat for cat, syms in SYMBOLS.items() if symbol in syms), None)
-            break
-        else:
+        if not is_valid:
             logger.info(f"Symbol {symbol} validation failed, skipping")
+            continue
+        
+        # Market is open and symbol is valid, proceed with trade setup
+        trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info)
+        if "status" in trade_setups and "Abort" in trade_setups["status"]:
+            logger.info(f"Trade setups for {symbol} indicate abort: {trade_setups['status']}")
+            continue
+        if generate_chart:
+            try:
+                chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1])
+            except Exception as e:
+                logger.error(f"Failed to generate chart for {symbol}: {e}")
+                continue
+        else:
+            chart_data = None
+        
+        position_size_long = None
+        if "Abort" not in trade_setups["long_buy_setup"].get("status", ""):
+            position_size_long = await calculate_mt5_position_size(symbol,
+                "long", 
+                trade_setups["long_buy_setup"]["entry"],
+                trade_setups["long_buy_setup"]["stop_loss"]
+            )
+            print(position_size_long)
+            trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_pct": position_size_long.data["actual_risk_pct"]}
+        
+        position_size_short = None
+        if "Abort" not in trade_setups["short_sell_setup"].get("status", ""):
+            position_size_short = await calculate_mt5_position_size(symbol, 
+                "short", 
+                trade_setups["short_sell_setup"]["entry"],
+                trade_setups["short_sell_setup"]["stop_loss"]
+            )
+            print(position_size_short)
+            trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_pct": position_size_short.data["actual_risk_pct"]}
+        print(trade_setups)
+        
+        picked_symbol = symbol
+        picked_market = market
+        break
     
     if not picked_symbol:
         msg = "No valid symbols available to trade on; Abort immediately"
         logger.error(msg)
         return {"error": msg}
-    
-    # Step 5: Return 
+
+    # Step 7: Return 
     
     result = {
         "market": picked_market,
