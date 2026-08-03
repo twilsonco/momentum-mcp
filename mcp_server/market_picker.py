@@ -741,7 +741,7 @@ async def pick_market(
         return {"error": msg}
 
     # Step 2b: Check account margin level
-    if minimum_margin_percent > 0:
+    if minimum_margin_percent > 0 and num_positions > 0:
         margin_level = await _get_margin_level()
         if margin_level is not None:
             logger.info(

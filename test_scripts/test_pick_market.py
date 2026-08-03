@@ -22,7 +22,7 @@ SERVER_ENV = {
     "MT5_MCP_URL": os.getenv("MT5_MCP_URL", "http://10.0.1.105:8080/sse"),
 }
 
-MAX_POSITIONS = 30
+MAX_POSITIONS = 15
 
 
 class MCPClient:
@@ -105,18 +105,8 @@ class MCPClient:
 
 
 def _contains_abort(obj) -> bool:
-    """Check if any value in the result contains 'Abort'."""
-    if isinstance(obj, dict):
-        for value in obj.values():
-            if _contains_abort(value):
-                return True
-    elif isinstance(obj, str) and "Abort" in obj:
-        return True
-    elif isinstance(obj, list):
-        for item in obj:
-            if _contains_abort(item):
-                return True
-    return False
+    """Check if the result dict only has 'error' as its key."""
+    return isinstance(obj, dict) and len(obj) == 1 and 'error' in obj
 
 
 async def main() -> dict:
@@ -136,11 +126,11 @@ async def main() -> dict:
             result = json.loads(text) if isinstance(text, str) else text
         else:
             result = response.get("result", {})
+        
+        print(result)
 
         if _contains_abort(result):
             return {"wakeAgent": False}
-
-        return result
 
     except asyncio.TimeoutError:
         return {"wakeAgent": False, "error": "pick_market timed out (30s)"}
