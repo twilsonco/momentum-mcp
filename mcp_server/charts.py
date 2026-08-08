@@ -102,6 +102,7 @@ async def generate_chart(
     stop_loss_price: float | None = None,
     take_profit_price: float | None = None,
     return_image: bool = False,
+    input_records: list[dict[str, Any]] | None = None,
 ) -> ChartResult | Image:
     """Generate a candlestick chart with EMA overlays for a ticker symbol.
 
@@ -171,7 +172,10 @@ async def generate_chart(
     ticker = ticker.strip().upper()
 
     # Fetch data
-    records = await get_historical_data(ticker, period=period, interval=interval, fallback_for_incomplete_data=False)
+    if input_records is not None:
+        records = input_records
+    else:
+        records = await get_historical_data(ticker, period=period, interval=interval, fallback_for_incomplete_data=False)
 
     if len(records) < 5:
         raise ValueError(

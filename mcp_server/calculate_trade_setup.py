@@ -149,6 +149,13 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         
     logger.info(f"Barrier Price: {barrier_price}, Barrier Distance: {barrier_distance}")
 
+    if sl_distance <= 0 or barrier_distance <= 0:
+        logger.warning(f"Invalid SL or Barrier distance. SL Distance: {sl_distance}, Barrier Distance: {barrier_distance}")
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": f"Invalid SL ({sl_distance}) or Barrier ({barrier_distance}) distance"
+        }
+    
     # 4. Enforce Risk-to-Reward (RR)
     # Ratios available: 1, 2, or 3
     if barrier_distance < sl_distance:

@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 import pytz
 
 from mcp_server.charts import generate_chart as _generate_chart, ChartResult
+from mcp_server.data import get_historical_data
 from mcp_server.calculate_trade_setup import calculate_trade_setups
 from mcp_server.mt5_position_sizer import calculate_mt5_position_size
 from mcp_server.utils.mt5_mcp_server import (
@@ -813,7 +814,10 @@ async def pick_market(
             continue
         if generate_chart:
             try:
-                chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1])
+                records = await get_historical_data(symbol, interval=interval, period=timeframe[1])
+                if not records or len(records) < 2:
+                    records = None
+                chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records)
             except Exception as e:
                 logger.error(f"Failed to generate chart for {symbol}: {e}")
                 continue
@@ -829,6 +833,9 @@ async def pick_market(
             )
             print(position_size_long)
             trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_pct": position_size_long.data["actual_risk_pct"]}
+            trade_setup_long = trade_setups["long_buy_setup"]
+            chart_data_long = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records, entry_price=trade_setup_long["entry"], stop_loss_price=trade_setup_long["stop_loss"], take_profit_price=trade_setup_long["take_profit"])
+            trade_setups["long_buy_setup"]["chart_path"] = chart_data_long["path"]
         
         position_size_short = None
         if "Abort" not in trade_setups["short_sell_setup"].get("status", ""):
@@ -839,6 +846,9 @@ async def pick_market(
             )
             print(position_size_short)
             trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_pct": position_size_short.data["actual_risk_pct"]}
+            trade_setup_short = trade_setups["short_sell_setup"]
+            chart_data_short = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records, entry_price=trade_setup_short["entry"], stop_loss_price=trade_setup_short["stop_loss"], take_profit_price=trade_setup_short["take_profit"])
+            trade_setups["short_sell_setup"]["chart_path"] = chart_data_short["path"]
         print(trade_setups)
         
         picked_symbol = symbol
