@@ -23,7 +23,7 @@ async def _get_symbol_info(symbol: str) -> dict:
     logger.warning(f"Symbol {symbol} validation returned empty response")
     return {}
 
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 1.0, digits: int = 5):
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5):
     """
     Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
     
