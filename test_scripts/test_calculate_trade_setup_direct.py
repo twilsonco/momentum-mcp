@@ -40,23 +40,25 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 from mcp_server.calculate_trade_setup import calculate_trade_setups
+from mcp_server.charts import generate_chart as _generate_chart
+from mcp_server.data import get_historical_data
 
 TICKER = "EURUSD"
 # 6 months of H1 data gives the VW-KDE method enough history to find
 # structural volume nodes on both sides of price. Shorter windows (e.g. 1mo)
 # often leave all density below a rising market, so no resistance node exists.
-PERIOD = "6mo"
+PERIOD = "1mo"
 INTERVAL = "1h"
 
 # SL/TP determination strategies to compare.
 STRATEGIES = ["swings", "vw_kde"]
 
 
-async def run_strategy(strategy: str) -> dict[str, Any]:
+async def run_strategy(strategy: str, records: list[dict[str, Any]] | None) -> dict[str, Any]:
     """Call calculate_trade_setups for a single strategy and return the result."""
     try:
         return await asyncio.wait_for(
-            calculate_trade_setups(TICKER, PERIOD, INTERVAL, strategy=strategy),
+            calculate_trade_setups(TICKER, PERIOD, INTERVAL, input_records=records, strategy=strategy),
             timeout=30.0,
         )
     except asyncio.TimeoutError:
@@ -68,9 +70,34 @@ async def run_strategy(strategy: str) -> dict[str, Any]:
 async def main() -> dict[str, Any]:
     """Run trade setups for every strategy and key the results by strategy name."""
     results: dict[str, dict] = {}
+    records = None
+    try:
+        records = await get_historical_data(TICKER, period=PERIOD, interval=INTERVAL)
+        if not records or len(records) < 2:
+            records = None
+    except Exception as e:
+        logging.error(f"Failed to get historical data for {TICKER}: {e}")
     for strategy in STRATEGIES:
         logging.info(f"Running strategy: {strategy}")
-        results[strategy] = await run_strategy(strategy)
+        results[strategy] = await run_strategy(strategy, records)
+        # Now make charts for resulting trade setups, if any. We pass the same records to avoid re-fetching.
+        for setup_type in ["long_buy_setup", "short_sell_setup"]:
+            if "Abort" not in results[strategy].get(setup_type, {}).get("status", ""):
+                setup = results[strategy][setup_type]
+                if setup.get("stop_loss_price") is not None and setup.get("take_profit_price") is not None:
+                    try:
+                        chart_data = await _generate_chart(
+                            TICKER,
+                            interval=INTERVAL,
+                            period=PERIOD,
+                            stop_loss_price=setup["stop_loss_price"],
+                            take_profit_price=setup["take_profit_price"],
+                            input_records=records,
+                            file_name_suffix=f"{strategy}_{setup_type}",
+                        )
+                        results[strategy][setup_type]["chart_path"] = chart_data["path"]
+                    except Exception as e:
+                        logging.error(f"Failed to generate chart for {TICKER} ({strategy}, {setup_type}): {e}")
     return {"ticker": TICKER, "period": PERIOD, "interval": INTERVAL, "results": results}
 
 

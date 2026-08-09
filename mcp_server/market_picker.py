@@ -807,16 +807,21 @@ async def pick_market(
             logger.info(f"Symbol {symbol} validation failed, skipping")
             continue
         
+        try:
+            records = await get_historical_data(symbol, interval=interval, period=timeframe[1])
+            if not records or len(records) < 2:
+                records = None
+        except Exception as e:
+            logger.error(f"Failed to get historical data for {symbol}: {e}")
+            continue
+        
         # Market is open and symbol is valid, proceed with trade setup
-        trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info)
+        trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info, input_records=records)
         if "status" in trade_setups and "Abort" in trade_setups["status"]:
             logger.info(f"Trade setups for {symbol} indicate abort: {trade_setups['status']}")
             continue
         if generate_chart:
             try:
-                records = await get_historical_data(symbol, interval=interval, period=timeframe[1])
-                if not records or len(records) < 2:
-                    records = None
                 chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records)
             except Exception as e:
                 logger.error(f"Failed to generate chart for {symbol}: {e}")

@@ -103,6 +103,7 @@ async def generate_chart(
     take_profit_price: float | None = None,
     return_image: bool = False,
     input_records: list[dict[str, Any]] | None = None,
+    file_name_suffix: str = "",
 ) -> ChartResult | Image:
     """Generate a candlestick chart with EMA overlays for a ticker symbol.
 
@@ -274,6 +275,8 @@ async def generate_chart(
             suffix_parts.append(f"s{stop_loss_price:.2f}")
         if take_profit_price is not None:
             suffix_parts.append(f"t{take_profit_price:.2f}")
+        if file_name_suffix:
+            suffix_parts.append(file_name_suffix)
         if suffix_parts:
             filename = f"{ticker}_{period}_{interval}_{'_'.join(suffix_parts)}.png"
         else:

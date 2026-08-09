@@ -462,18 +462,21 @@ _STRATEGIES = {
 }
 
 
-async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str = "swings") -> dict[str, Any]:
+async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str = "swings", input_records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     
     ticker = ticker.strip().upper()
     
     # Fetch data — we don't need the full requested period, so don't waste
     # time falling back to other sources just because the date range is short.
-    records = await get_historical_data(
-        ticker,
-        period=period,
-        interval=interval,
-        fallback_for_incomplete_data=False,
-    )
+    if input_records is not None:
+        records = input_records
+    else:
+        records = await get_historical_data(
+            ticker,
+            period=period,
+            interval=interval,
+            fallback_for_incomplete_data=False,
+        )
     if symbol_info is None:
         symbol_info = await _get_symbol_info(ticker)
     
