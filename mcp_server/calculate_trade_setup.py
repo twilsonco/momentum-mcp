@@ -4,6 +4,8 @@ from asyncio.log import logger
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
+from scipy.stats import gaussian_kde
+from scipy.signal import find_peaks
 from typing import Any
 from mcp_server.data import get_historical_data
 from mcp_server.technicals import _extract_last
@@ -23,7 +25,7 @@ async def _get_symbol_info(symbol: str) -> dict:
     logger.warning(f"Symbol {symbol} validation returned empty response")
     return {}
 
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5):
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5, strategy: str = "swings"):
     """
     Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
     
@@ -33,12 +35,16 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     direction (str): 'long' or 'short'
     spread (float): Current spread distance (in price terms, e.g., 0.0002 for forex)
     atr_period (int): Period for ATR calculation (default 14)
+    strategy (str): SL/TP determination method: "swings" (default) or "vw_kde".
     """
     
-    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}")
+    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}, strategy={strategy}")
     
-    # Determine SL and TP levels using the default ATR/swing strategy.
-    setup = _determine_sl_tp_from_swings(
+    if strategy not in _STRATEGIES:
+        raise ValueError(f"Unknown strategy '{strategy}'. Valid options: {list(_STRATEGIES)}")
+    
+    # Determine SL and TP levels using the selected strategy.
+    setup = _STRATEGIES[strategy](
         df,
         entry_price=entry_price,
         direction=direction,
@@ -84,6 +90,34 @@ def _calculate_atr(df: pd.DataFrame, atr_period: int = 14) -> float:
     high = pd.to_numeric(df["High"], errors="coerce")
     low = pd.to_numeric(df["Low"], errors="coerce")
     return _extract_last(ta.atr(high, low, close, length=atr_period))
+
+
+def _apply_target_rr(
+    entry_price: float,
+    direction: str,
+    sl_distance: float,
+    barrier_distance: float,
+) -> tuple[float, float]:
+    """Enforce a discrete risk-to-reward ratio (1, 2, or 3).
+
+    Returns:
+        Tuple of (final_tp, target_rr). If the structural barrier doesn't allow
+        at least 1:1, forces a 1:1 target.
+    """
+    # Ratios available: 1, 2, or 3
+    if barrier_distance < sl_distance:
+        # Force 1:1 if structural barrier doesn't allow it
+        target_rr = 1
+    else:
+        # Find the highest discrete RR (1, 2, or 3) that fits before the barrier
+        target_rr = round(min(barrier_distance / sl_distance, 3.0), 2)
+
+    if direction.lower() == 'long':
+        final_tp = entry_price + (sl_distance * target_rr)
+    else:
+        final_tp = entry_price - (sl_distance * target_rr)
+
+    return final_tp, target_rr
 
 
 def _determine_sl_tp_from_swings(
@@ -222,21 +256,12 @@ def _determine_sl_tp_from_swings(
         }
     
     # 4. Enforce Risk-to-Reward (RR)
-    # Ratios available: 1, 2, or 3
-    if barrier_distance < sl_distance:
-        # Force 1:1 if structural barrier doesn't allow it
-        target_rr = 1
-    else:
-        # Find the highest discrete RR (1, 2, or 3) that fits before the barrier
-        target_rr = round(min(barrier_distance / sl_distance, 3.0), 2)
+    final_tp, target_rr = _apply_target_rr(
+        entry_price, direction, sl_distance, barrier_distance
+    )
     
     logger.info(f"Target RR: {target_rr}, SL Distance: {sl_distance}, Barrier Distance: {barrier_distance}")
             
-    if direction.lower() == 'long':
-        final_tp = entry_price + (sl_distance * target_rr)
-    else:
-        final_tp = entry_price - (sl_distance * target_rr)
-    
     if final_tp <= 0 or proposed_sl <= 0:
         logger.warning(f"Invalid final TP ({final_tp}) or proposed SL ({proposed_sl})")
         return {
@@ -256,8 +281,188 @@ def _determine_sl_tp_from_swings(
     }
 
 
+def _cluster_levels(levels: np.ndarray, min_gap: float) -> np.ndarray:
+    """Merge peaks that are closer than ``min_gap`` into a representative level.
 
-async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None) -> dict[str, Any]:
+    Raw KDE peak detection on a fine price grid can return many micro-peaks
+    clustered around the same consolidation zone. This merges neighbours within
+    ``min_gap`` and returns their mean as a single structural level.
+    """
+    if len(levels) == 0:
+        return np.array([])
+    levels = np.sort(np.asarray(levels, dtype=float))
+    clusters: list[list[float]] = [[levels[0]]]
+    for lv in levels[1:]:
+        if lv - clusters[-1][-1] <= min_gap:
+            clusters[-1].append(float(lv))
+        else:
+            clusters.append([float(lv)])
+    return np.array([np.mean(c) for c in clusters])
+
+
+def _get_vw_kde_sr_levels(
+    df: pd.DataFrame,
+    resolution: int = 1000,
+    bw_frac: float = 0.10,
+    prominence_frac: float = 0.05,
+) -> np.ndarray:
+    """Calculate Support/Resistance levels using Volume-Weighted KDE.
+
+    Typical Price (High+Low+Close)/3 is weighted by volume so that high-volume
+    consolidation areas produce density spikes while low-volume outlier wicks
+    are suppressed. Prominent peaks in the resulting curve represent High
+    Volume Nodes (HVNs).
+
+    Bandwidth is specified as a fraction of the price standard deviation, giving
+    an *absolute* bandwidth that behaves consistently across instruments with
+    very different price scales (e.g. EURUSD at ~1.15 vs AAPL at ~200). Detected
+    peaks are then clustered so nearby micro-peaks collapse into single true
+    structural levels.
+
+    Args:
+        df: DataFrame containing 'High', 'Low', 'Close', and 'Volume'.
+        resolution: Number of points in the price grid.
+        bw_frac: KDE bandwidth as a fraction of the typical-price standard
+            deviation. Smaller = more sensitive (more micro-levels); larger =
+            smoother (fewer, broader consolidation zones).
+        prominence_frac: Minimum peak prominence as a fraction of max density.
+
+    Returns:
+        Array of price levels representing prominent High Volume Nodes, or an
+        empty array if no peaks meet the prominence threshold.
+    """
+    # Typical Price captures intra-bar action; volume acts as its weight so
+    # high-volume areas dominate the distribution.
+    typical_price = (df['High'] + df['Low'] + df['Close']) / 3.0
+    prices = np.asarray(typical_price, dtype=float)
+    weights = np.asarray(df['Volume'], dtype=float)
+
+    if len(prices) < 2 or weights.sum() <= 0:
+        return np.array([])
+
+    # Absolute bandwidth scaled to the price range so results are consistent
+    # regardless of instrument price magnitude.
+    bw_abs = float(np.nanstd(prices)) * bw_frac
+    kde = gaussian_kde(prices, weights=weights, bw_method=bw_abs)
+    price_grid = np.linspace(
+        float(np.nanmin(df['Low'])),
+        float(np.nanmax(df['High'])),
+        resolution,
+    )
+    pdf = kde(price_grid)
+
+    prominence_threshold = pdf.max() * prominence_frac
+    peaks, _ = find_peaks(pdf, prominence=prominence_threshold)
+    raw_levels = price_grid[peaks]
+
+    # Merge micro-peaks within one bandwidth into single structural levels.
+    return _cluster_levels(raw_levels, min_gap=bw_abs)
+
+
+def _determine_sl_tp_from_vw_kde(
+    df: pd.DataFrame,
+    entry_price: float,
+    direction: str,
+    atr_period: int = 14,
+    digits: int = 5,
+) -> dict:
+    """Determine SL and TP levels using Volume-Weighted KDE High Volume Nodes.
+
+    This is an alternative level-determination strategy that shares the same
+    signature and return contract as `_determine_sl_tp_from_swings`, making it a
+    drop-in replacement for use by `calculate_trade_setup`.
+
+    For a long, the nearest prominent HVN below entry acts as support (SL) and
+    the nearest above as resistance (TP). For a short these are reversed. If no
+    valid structural node exists on either side of the current price, the trade
+    is invalidated.
+
+    Returns:
+        dict: On success contains status "Valid" plus stop_loss, take_profit,
+              risk_reward_ratio (as "1:x"), sl_distance, and atr. On failure it
+              returns a non-"Valid" status with a human-readable reason.
+    """
+    current_atr = _calculate_atr(df, atr_period=atr_period)
+
+    sr_levels = _get_vw_kde_sr_levels(df)
+    if len(sr_levels) == 0:
+        logger.warning("VW-KDE produced no prominent High Volume Nodes; invalidating trade.")
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": (
+                "No prominent volume nodes found (flat/wide distribution). "
+                "Trend is unbacked by structural support/resistance."
+            ),
+        }
+
+    levels_below = sr_levels[sr_levels < entry_price]
+    levels_above = sr_levels[sr_levels > entry_price]
+
+    if direction.lower() == 'long':
+        # Long needs support below (SL) and resistance above (TP).
+        if len(levels_below) == 0 or len(levels_above) == 0:
+            return {
+                "status": f"Abort: Do not open {direction} position",
+                "reason": (
+                    "No structural node on both sides of price; "
+                    "cannot place a valid SL and TP."
+                ),
+            }
+        proposed_sl = levels_below[-1]  # nearest level below
+        barrier_price = levels_above[0]  # nearest level above
+    elif direction.lower() == 'short':
+        # Short needs resistance above (SL) and support below (TP).
+        if len(levels_above) == 0 or len(levels_below) == 0:
+            return {
+                "status": f"Abort: Do not open {direction} position",
+                "reason": (
+                    "No structural node on both sides of price; "
+                    "cannot place a valid SL and TP."
+                ),
+            }
+        proposed_sl = levels_above[0]  # nearest level above
+        barrier_price = levels_below[-1]  # nearest level below
+    else:
+        raise ValueError("Direction must be 'long' or 'short'")
+
+    sl_distance = abs(entry_price - proposed_sl)
+    barrier_distance = abs(barrier_price - entry_price)
+
+    if sl_distance <= 0 or barrier_distance <= 0:
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": f"Invalid SL ({sl_distance}) or Barrier ({barrier_distance}) distance",
+        }
+
+    final_tp, target_rr = _apply_target_rr(
+        entry_price, direction, sl_distance, barrier_distance
+    )
+
+    if final_tp <= 0 or proposed_sl <= 0:
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": f"Invalid final TP ({final_tp}) or proposed SL ({proposed_sl})",
+        }
+
+    return {
+        "status": "Valid",
+        "stop_loss": round(proposed_sl, digits),
+        "take_profit": round(final_tp, digits),
+        "risk_reward_ratio": f"1:{target_rr}",
+        "sl_distance": round(sl_distance, digits),
+        "atr": current_atr,
+    }
+
+
+# Registry of available SL/TP determination strategies. Each maps a strategy
+# name to the function that computes stop_loss/take_profit levels.
+_STRATEGIES = {
+    "swings": _determine_sl_tp_from_swings,
+    "vw_kde": _determine_sl_tp_from_vw_kde,
+}
+
+
+async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str = "swings") -> dict[str, Any]:
     
     ticker = ticker.strip().upper()
     
@@ -311,13 +516,13 @@ async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol
     spread = symbol_info["ask"] - symbol_info["bid"]
     
     # Calculate long setup
-    logger.info(f"Calculating long setup for {ticker}")
-    long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, digits=symbol_info["digits"])
+    logger.info(f"Calculating long setup for {ticker} (strategy={strategy})")
+    long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, digits=symbol_info["digits"], strategy=strategy)
     ret["long_buy_setup"] = long_setup
     
     # Calculate short setup
-    logger.info(f"Calculating short setup for {ticker}")
-    short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, digits=symbol_info["digits"])
+    logger.info(f"Calculating short setup for {ticker} (strategy={strategy})")
+    short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, digits=symbol_info["digits"], strategy=strategy)
     ret["short_sell_setup"] = short_setup
     
     if all("Abort" in setup.get("status", "") for setup in (long_setup, short_setup)):

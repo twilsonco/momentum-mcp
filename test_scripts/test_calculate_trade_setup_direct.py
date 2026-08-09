@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 # Add project root to path
 PROJECT_ROOT = Path("/Users/haiiro/NoSync/momentum-mcp")
@@ -41,22 +42,36 @@ logging.getLogger("yfinance").setLevel(logging.WARNING)
 from mcp_server.calculate_trade_setup import calculate_trade_setups
 
 TICKER = "EURUSD"
-PERIOD = "1mo"
+# 6 months of H1 data gives the VW-KDE method enough history to find
+# structural volume nodes on both sides of price. Shorter windows (e.g. 1mo)
+# often leave all density below a rising market, so no resistance node exists.
+PERIOD = "6mo"
 INTERVAL = "1h"
 
+# SL/TP determination strategies to compare.
+STRATEGIES = ["swings", "vw_kde"]
 
-async def main() -> dict:
-    """Call calculate_trade_setups directly and return the result."""
+
+async def run_strategy(strategy: str) -> dict[str, Any]:
+    """Call calculate_trade_setups for a single strategy and return the result."""
     try:
-        result = await asyncio.wait_for(
-            calculate_trade_setups(TICKER, PERIOD, INTERVAL),
+        return await asyncio.wait_for(
+            calculate_trade_setups(TICKER, PERIOD, INTERVAL, strategy=strategy),
             timeout=30.0,
         )
-        return result
     except asyncio.TimeoutError:
-        return {"error": "calculate_trade_setups timed out (30s)"}
+        return {"error": f"calculate_trade_setups ({strategy}) timed out (30s)"}
     except Exception as exc:
-        return {"error": f"Exception: {exc}"}
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+async def main() -> dict[str, Any]:
+    """Run trade setups for every strategy and key the results by strategy name."""
+    results: dict[str, dict] = {}
+    for strategy in STRATEGIES:
+        logging.info(f"Running strategy: {strategy}")
+        results[strategy] = await run_strategy(strategy)
+    return {"ticker": TICKER, "period": PERIOD, "interval": INTERVAL, "results": results}
 
 
 if __name__ == "__main__":
@@ -76,7 +91,15 @@ if __name__ == "__main__":
             return [_normalize(v) for v in obj]
         return obj
 
-    result = _normalize(result)
+    # Determine exit code from the typed results before normalization.
+    has_error = any(
+        "error" in setup
+        for strategy_result in result["results"].values()
+        if isinstance(strategy_result, dict)
+        for setup in (strategy_result.get("long_buy_setup", {}), strategy_result.get("short_sell_setup", {}))
+    )
 
-    print(json.dumps(result, indent=2, default=str))
-    sys.exit(0 if "error" not in result else 1)
+    normalized = _normalize(result)
+
+    print(json.dumps(normalized, indent=2, default=str))
+    sys.exit(1 if has_error else 0)
