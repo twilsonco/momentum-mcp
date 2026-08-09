@@ -37,13 +37,78 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     
     logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}")
     
-    # 1. Calculate ATR (Current)
+    # Determine SL and TP levels using the default ATR/swing strategy.
+    setup = _determine_sl_tp_from_swings(
+        df,
+        entry_price=entry_price,
+        direction=direction,
+        atr_period=atr_period,
+        digits=digits,
+    )
+
+    # Propagate any abort from level determination (e.g. insufficient data).
+    if setup["status"] != "Valid":
+        return {
+            "status": setup.get("reason", "Abort"),
+            "reason": setup.get("reason", ""),
+        }
+
+    proposed_sl = setup["stop_loss"]
+    sl_distance = setup["sl_distance"]
+    final_tp = setup["take_profit"]
+    target_rr = float(setup["risk_reward_ratio"].split(":")[1])
+
+    # 5. Check Spread Limit
+    # Spread must be strictly less than `max_spread_factor_of_sl_dist` of the SL distance
+    if spread >= (max_spread_factor_of_sl_dist * sl_distance):
+        logger.warning(f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})")
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})"
+        }
+
+    return {
+        "status": "Valid",
+        "entry": entry_price,
+        "stop_loss": proposed_sl,
+        "take_profit": final_tp,
+        "risk_reward_ratio": f"1:{target_rr}",
+        "sl_distance": sl_distance,
+        "atr": setup["atr"]
+    }
+
+
+def _calculate_atr(df: pd.DataFrame, atr_period: int = 14) -> float:
+    """Calculate the current ATR value from a price DataFrame."""
     close = pd.to_numeric(df["Close"], errors="coerce")
     high = pd.to_numeric(df["High"], errors="coerce")
     low = pd.to_numeric(df["Low"], errors="coerce")
-    current_atr = _extract_last(ta.atr(high, low, close, length=14))
-    last_timestamp = df.index[-1]
+    return _extract_last(ta.atr(high, low, close, length=atr_period))
+
+
+def _determine_sl_tp_from_swings(
+    df: pd.DataFrame,
+    entry_price: float,
+    direction: str,
+    atr_period: int = 14,
+    digits: int = 5,
+) -> dict:
+    """Determine SL and TP levels using the default ATR/swing strategy.
+
+    This is one implementation of level determination. Alternative strategies
+    (e.g. fixed-percentage, volatility-based, or support/resistance methods)
+    can be added as separate functions with an identical signature and return
+    contract so they are drop-in replacements for `calculate_trade_setup`.
+
+    Returns:
+        dict: On success contains status "Valid" plus stop_loss, take_profit,
+              risk_reward_ratio (as "1:x"), sl_distance, and atr. On failure it
+              returns a non-"Valid" status with a human-readable reason.
+    """
     
+    # 1. Calculate ATR (Current)
+    current_atr = _calculate_atr(df, atr_period=atr_period)
+
     # Define bar-based windows based on inferred interval.
     # We prefer a 48-bar lookback for the swing low/high, but will accept
     # as little as 24 bars of history. Less than 24 bars → abort.
@@ -181,18 +246,8 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     
     final_tp = round(final_tp, digits)
 
-    # 5. Check Spread Limit
-    # Spread must be strictly less than `max_spread_factor_of_sl_dist` of the SL distance
-    if spread >= (max_spread_factor_of_sl_dist * sl_distance):
-        logger.warning(f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})")
-        return {
-            "status": f"Abort: Do not open {direction} position",
-            "reason": f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})"
-        }
-
     return {
         "status": "Valid",
-        "entry": entry_price,
         "stop_loss": proposed_sl,
         "take_profit": final_tp,
         "risk_reward_ratio": f"1:{target_rr}",
