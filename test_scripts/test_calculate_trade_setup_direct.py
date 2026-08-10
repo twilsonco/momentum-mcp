@@ -81,23 +81,35 @@ async def main() -> dict[str, Any]:
         logging.info(f"Running strategy: {strategy}")
         results[strategy] = await run_strategy(strategy, records)
         # Now make charts for resulting trade setups, if any. We pass the same records to avoid re-fetching.
+        # Note: when BOTH directions abort, calculate_trade_setups returns only
+        # {"status": "Abort: Do not open any position"} with no per-direction keys,
+        # so we must guard against setup_type being absent before indexing it.
         for setup_type in ["long_buy_setup", "short_sell_setup"]:
-            if "Abort" not in results[strategy].get(setup_type, {}).get("status", ""):
-                setup = results[strategy][setup_type]
-                if setup.get("stop_loss_price") is not None and setup.get("take_profit_price") is not None:
-                    try:
-                        chart_data = await _generate_chart(
-                            TICKER,
-                            interval=INTERVAL,
-                            period=PERIOD,
-                            stop_loss_price=setup["stop_loss_price"],
-                            take_profit_price=setup["take_profit_price"],
-                            input_records=records,
-                            file_name_suffix=f"{strategy}_{setup_type}",
-                        )
-                        results[strategy][setup_type]["chart_path"] = chart_data["path"]
-                    except Exception as e:
-                        logging.error(f"Failed to generate chart for {TICKER} ({strategy}, {setup_type}): {e}")
+            setup = results[strategy].get(setup_type)
+            if not isinstance(setup, dict) or "Abort" in setup.get("status", ""):
+                continue
+            # The setup payload uses `entry`/`stop_loss`/`take_profit` keys (no
+            # `_price` suffix); pass those to the chart overlay. entry_price is
+            # required by generate_chart whenever SL/TP are provided.
+            entry = setup.get("entry")
+            sl = setup.get("stop_loss")
+            tp = setup.get("take_profit")
+            if entry is None or sl is None or tp is None:
+                continue
+            try:
+                chart_data = await _generate_chart(
+                    TICKER,
+                    interval=INTERVAL,
+                    period=PERIOD,
+                    entry_price=entry,
+                    stop_loss_price=sl,
+                    take_profit_price=tp,
+                    input_records=records,
+                    file_name_suffix=f"{strategy}_{setup_type}",
+                )
+                results[strategy][setup_type]["chart_path"] = chart_data["path"]
+            except Exception as e:
+                logging.error(f"Failed to generate chart for {TICKER} ({strategy}, {setup_type}): {e}")
     return {"ticker": TICKER, "period": PERIOD, "interval": INTERVAL, "results": results}
 
 

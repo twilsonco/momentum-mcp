@@ -26,27 +26,22 @@ async def _get_symbol_info(symbol: str) -> dict:
     logger.warning(f"Symbol {symbol} validation returned empty response")
     return {}
 
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5, strategy: str = "swings", strategy_params: dict[str, Any] | None = None):
+def _evaluate_strategy(
+    df: pd.DataFrame,
+    entry_price: float,
+    direction: str,
+    spread: int,
+    strategy: str,
+    atr_period: int = 14,
+    max_spread_factor_of_sl_dist: float = 0.15,
+    digits: int = 5,
+    strategy_params: dict[str, Any] | None = None,
+) -> dict:
+    """Run a single SL/TP strategy and apply the spread-limit check.
+
+    This is factored out so `calculate_trade_setup` can iterate over strategies
+    in preference order. Returns either a "Valid" setup or an abort dict.
     """
-    Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
-    
-    Parameters:
-    df (pd.DataFrame): Price data with a DatetimeIndex and ['High', 'Low', 'Close']
-    entry_price (float): Current price for trade entry
-    direction (str): 'long' or 'short'
-    spread (float): Current spread distance (in price terms, e.g., 0.0002 for forex)
-    atr_period (int): Period for ATR calculation (default 14)
-    strategy (str): SL/TP determination method: "swings" (default), "vw_kde", or "dbscan".
-    strategy_params (dict | None): Optional per-strategy tuning overrides forwarded to the
-        selected level-determination function. Keys not applicable to a given strategy are
-        ignored. See each strategy's docstring for its supported parameters.
-    """
-    
-    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}, strategy={strategy}")
-    
-    if strategy not in _STRATEGIES:
-        raise ValueError(f"Unknown strategy '{strategy}'. Valid options: {list(_STRATEGIES)}")
-    
     # Determine SL and TP levels using the selected strategy, forwarding any
     # per-strategy tuning parameters (unknown keys are swallowed by **kwargs).
     setup = _STRATEGIES[strategy](
@@ -70,7 +65,7 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     final_tp = setup["take_profit"]
     target_rr = float(setup["risk_reward_ratio"].split(":")[1])
 
-    # 5. Check Spread Limit
+    # Check Spread Limit
     # Spread must be strictly less than `max_spread_factor_of_sl_dist` of the SL distance
     if spread >= (max_spread_factor_of_sl_dist * sl_distance):
         logger.warning(f"High spread. Spread ({spread:.5f}) >= {max_spread_factor_of_sl_dist*100:.0f}% of SL Distance ({sl_distance:.5f} @ {proposed_sl:.5f})")
@@ -87,6 +82,69 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         "risk_reward_ratio": f"1:{target_rr}",
         "sl_distance": sl_distance,
         "atr": setup["atr"]
+    }
+
+
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5, strategy: str | None = "auto", strategy_params: dict[str, Any] | None = None):
+    """
+    Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
+
+    When ``strategy`` is a specific name (e.g. "swings"), only that strategy is
+    tried. When it is ``"auto"`` (the default) or ``None``, strategies are tried in
+    decreasing order of preference (`_STRATEGY_PREFERENCE`: KDE > DBSCAN > Swings);
+    the first one to produce a valid setup wins, otherwise the trade aborts.
+
+    Parameters:
+    df (pd.DataFrame): Price data with a DatetimeIndex and ['High', 'Low', 'Close']
+    entry_price (float): Current price for trade entry
+    direction (str): 'long' or 'short'
+    spread (float): Current spread distance (in price terms, e.g., 0.0002 for forex)
+    atr_period (int): Period for ATR calculation (default 14)
+    strategy (str | None): SL/TP method: "auto"/None to cascade through all
+        strategies in preference order, or a specific name from _STRATEGIES.
+    strategy_params (dict | None): Optional per-strategy tuning overrides forwarded
+        to the selected level-determination function(s). Keys not applicable to a
+        given strategy are ignored. See each strategy's docstring for its params.
+    """
+
+    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}, strategy={strategy}")
+
+    # Resolve which strategies to try, in order.
+    if strategy is None or strategy == "auto":
+        candidates = _STRATEGY_PREFERENCE
+    else:
+        if strategy not in _STRATEGIES:
+            raise ValueError(f"Unknown strategy '{strategy}'. Valid options: {list(_STRATEGIES)}")
+        candidates = [strategy]
+
+    # Try each candidate until one yields a valid setup. All operate on the same
+    # `df`, so no additional data fetching is required between attempts.
+    for strat in candidates:
+        result = _evaluate_strategy(
+            df,
+            entry_price=entry_price,
+            direction=direction,
+            spread=spread,
+            strategy=strat,
+            atr_period=atr_period,
+            max_spread_factor_of_sl_dist=max_spread_factor_of_sl_dist,
+            digits=digits,
+            strategy_params=strategy_params,
+        )
+        if result["status"] == "Valid":
+            logger.info(f"Strategy '{strat}' produced a valid {direction} setup.")
+            return result
+        logger.info(f"Strategy '{strat}' did not produce a valid {direction} setup; trying next.")
+
+    # No strategy produced a valid setup — abort in the requested direction.
+    reason = (
+        f"No SL/TP strategy ({', '.join(candidates)}) yielded a valid "
+        f"{direction} trade setup."
+    )
+    logger.warning(reason)
+    return {
+        "status": f"Abort: Do not open {direction} position",
+        "reason": reason,
     }
 
 
@@ -732,8 +790,13 @@ _STRATEGIES = {
     "dbscan": _determine_sl_tp_from_dbscan,
 }
 
+# Order in which strategies are tried when `strategy="auto"` (the default).
+# Strategies earlier in the list are preferred; the first one that yields a
+# valid trade setup wins. Add new entries here to include them in the cascade.
+_STRATEGY_PREFERENCE = ["vw_kde", "dbscan", "swings"]
 
-async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str = "swings", input_records: list[dict[str, Any]] | None = None, strategy_params: dict[str, Any] | None = None) -> dict[str, Any]:
+
+async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str | None = "auto", input_records: list[dict[str, Any]] | None = None, strategy_params: dict[str, Any] | None = None) -> dict[str, Any]:
     
     ticker = ticker.strip().upper()
     
