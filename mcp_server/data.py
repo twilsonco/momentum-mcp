@@ -75,10 +75,17 @@ _PERIOD_TRADING_DAYS = {
     "ytd": 200, "max": 5000,
 }
 
-# Bars per trading day for intraday intervals (6.5h = 390 min)
+# Bars per calendar day for intraday intervals.
+#
+# This module supports forex / metals / crypto via MT5 MCP (and TwelveData),
+# which trade ~24h/day — NOT the US equity market's 6.5-hour session. Using a
+# full-day bar count ensures we request enough candles to actually span the
+# requested *period* for these instruments (e.g. a month of H1 forex needs
+# ~500+ bars, not 154). Requesting more than exists is harmless: MT5 returns
+# what's available and _date_range_covers_period() checks coverage separately.
 _INTRADAY_BARS_PER_DAY = {
-    "1m": 390, "2m": 195, "5m": 78, "15m": 26,
-    "30m": 13, "60m": 7, "1h": 7, "90m": 5,
+    "1m": 1440, "2m": 720, "5m": 288, "15m": 96,
+    "30m": 48, "60m": 24, "1h": 23, "90m": 16,
 }
 
 
