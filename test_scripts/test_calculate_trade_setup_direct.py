@@ -54,8 +54,8 @@ INTERVAL = "1h"
 STRATEGIES = ["swings", "vw_kde", "dbscan"]
 
 
-async def run_strategy(strategy: str, records: list[dict[str, Any]] | None) -> dict[str, Any]:
-    """Call calculate_trade_setups for a single strategy and return the result."""
+async def run_strategy(strategy: str | None, records: list[dict[str, Any]] | None) -> dict[str, Any]:
+    """Call calculate_trade_setups for a single strategy (None = auto cascade) and return the result."""
     try:
         return await asyncio.wait_for(
             calculate_trade_setups(TICKER, PERIOD, INTERVAL, input_records=records, strategy=strategy),
@@ -77,6 +77,14 @@ async def main() -> dict[str, Any]:
             records = None
     except Exception as e:
         logging.error(f"Failed to get historical data for {TICKER}: {e}")
+
+    # Capture the exact output the MCP tool returns: with no strategy pinned,
+    # calculate_trade_setups cascades through all strategies in preference order
+    # (KDE > DBSCAN > Swings) and keeps only the FIRST successful setup per
+    # direction, or aborts if every strategy fails for that direction.
+    logging.info("Running tool output: auto cascade")
+    results["tool_auto"] = await run_strategy(None, records)
+
     for strategy in STRATEGIES:
         logging.info(f"Running strategy: {strategy}")
         results[strategy] = await run_strategy(strategy, records)
