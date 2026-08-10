@@ -34,13 +34,21 @@ def _evaluate_strategy(
     strategy: str,
     atr_period: int = 14,
     max_spread_factor_of_sl_dist: float = 0.15,
+    max_sl_atr_factor: float = 3.0,
+    max_tp_sl_factor: float = 2.5,
     digits: int = 5,
     strategy_params: dict[str, Any] | None = None,
 ) -> dict:
-    """Run a single SL/TP strategy and apply the spread-limit check.
+    """Run a single SL/TP strategy and apply the spread + distance-limit checks.
 
     This is factored out so `calculate_trade_setup` can iterate over strategies
     in preference order. Returns either a "Valid" setup or an abort dict.
+
+    After a strategy proposes levels, two hard caps are enforced uniformly:
+      - SL distance must not exceed ``max_sl_atr_factor`` x ATR.
+      - TP distance must not exceed ``max_tp_sl_factor`` x SL distance.
+    Both clamp the proposed level inward toward entry rather than aborting,
+    keeping risk bounded regardless of how wide a structural level sits.
     """
     # Determine SL and TP levels using the selected strategy, forwarding any
     # per-strategy tuning parameters (unknown keys are swallowed by **kwargs).
@@ -64,6 +72,41 @@ def _evaluate_strategy(
     sl_distance = setup["sl_distance"]
     final_tp = setup["take_profit"]
     target_rr = float(setup["risk_reward_ratio"].split(":")[1])
+    atr = setup["atr"]
+
+    # Cap 1 — Stop Loss distance must not exceed a factor of ATR.
+    max_sl_dist = max_sl_atr_factor * atr
+    if sl_distance > max_sl_dist:
+        logger.info(
+            f"SL distance ({sl_distance:.5f}) exceeds cap "
+            f"{max_sl_atr_factor}x ATR ({max_sl_dist:.5f}); clamping SL."
+        )
+        sl_distance = max_sl_dist
+        proposed_sl = (
+            entry_price - sl_distance if direction.lower() == 'long'
+            else entry_price + sl_distance
+        )
+
+    # Cap 2 — Take Profit distance must not exceed a factor of the (capped) SL.
+    tp_distance = abs(final_tp - entry_price)
+    max_tp_dist = max_tp_sl_factor * sl_distance
+    if tp_distance > max_tp_dist:
+        logger.info(
+            f"TP distance ({tp_distance:.5f}) exceeds cap "
+            f"{max_tp_sl_factor}x SL ({max_tp_dist:.5f}); clamping TP."
+        )
+        final_tp = (
+            entry_price + max_tp_dist if direction.lower() == 'long'
+            else entry_price - max_tp_dist
+        )
+
+    # Recompute the discrete RR from the (possibly capped) distances.
+    tp_distance = abs(final_tp - entry_price)
+    target_rr = round(min(tp_distance / sl_distance, 3.0), 2)
+
+    proposed_sl = round(proposed_sl, digits)
+    final_tp = round(final_tp, digits)
+    sl_distance = round(sl_distance, digits)
 
     # Check Spread Limit
     # Spread must be strictly less than `max_spread_factor_of_sl_dist` of the SL distance
@@ -81,11 +124,11 @@ def _evaluate_strategy(
         "take_profit": final_tp,
         "risk_reward_ratio": f"1:{target_rr}",
         "sl_distance": sl_distance,
-        "atr": setup["atr"]
+        "atr": atr
     }
 
 
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5, strategy: str | None = "auto", strategy_params: dict[str, Any] | None = None):
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, max_sl_atr_factor: float = 3.0, max_tp_sl_factor: float = 2.5, digits: int = 5, strategy: str | None = "auto", strategy_params: dict[str, Any] | None = None):
     """
     Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
 
@@ -94,12 +137,18 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     decreasing order of preference (`_STRATEGY_PREFERENCE`: KDE > DBSCAN > Swings);
     the first one to produce a valid setup wins, otherwise the trade aborts.
 
+    Distance caps applied uniformly after any strategy proposes levels:
+      - SL distance is capped at ``max_sl_atr_factor`` x ATR (default 3x).
+      - TP distance is capped at ``max_tp_sl_factor`` x SL distance (default 2.5x).
+
     Parameters:
     df (pd.DataFrame): Price data with a DatetimeIndex and ['High', 'Low', 'Close']
     entry_price (float): Current price for trade entry
     direction (str): 'long' or 'short'
     spread (float): Current spread distance (in price terms, e.g., 0.0002 for forex)
     atr_period (int): Period for ATR calculation (default 14)
+    max_sl_atr_factor (float): Max SL distance as a multiple of ATR.
+    max_tp_sl_factor (float): Max TP distance as a multiple of the SL distance.
     strategy (str | None): SL/TP method: "auto"/None to cascade through all
         strategies in preference order, or a specific name from _STRATEGIES.
     strategy_params (dict | None): Optional per-strategy tuning overrides forwarded
@@ -107,7 +156,7 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
         given strategy are ignored. See each strategy's docstring for its params.
     """
 
-    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}, strategy={strategy}")
+    logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, max_sl_atr_factor={max_sl_atr_factor}, max_tp_sl_factor={max_tp_sl_factor}, digits={digits}, strategy={strategy}")
 
     # Resolve which strategies to try, in order.
     if strategy is None or strategy == "auto":
@@ -128,6 +177,8 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
             strategy=strat,
             atr_period=atr_period,
             max_spread_factor_of_sl_dist=max_spread_factor_of_sl_dist,
+            max_sl_atr_factor=max_sl_atr_factor,
+            max_tp_sl_factor=max_tp_sl_factor,
             digits=digits,
             strategy_params=strategy_params,
         )
@@ -148,12 +199,21 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     }
 
 
-def _calculate_atr(df: pd.DataFrame, atr_period: int = 14) -> float:
-    """Calculate the current ATR value from a price DataFrame."""
+def _atr_series(df: pd.DataFrame, atr_period: int = 14):
+    """Compute the ATR series for a price DataFrame using ``ta.atr``.
+
+    Single source of truth for ATR so no caller re-implements or duplicates
+    the calculation. Returns the raw pandas Series from ``pandas_ta``.
+    """
     close = pd.to_numeric(df["Close"], errors="coerce")
     high = pd.to_numeric(df["High"], errors="coerce")
     low = pd.to_numeric(df["Low"], errors="coerce")
-    return _extract_last(ta.atr(high, low, close, length=atr_period))
+    return ta.atr(high, low, close, length=atr_period)
+
+
+def _calculate_atr(df: pd.DataFrame, atr_period: int = 14) -> float:
+    """Calculate the current ATR value from a price DataFrame."""
+    return _extract_last(_atr_series(df, atr_period=atr_period))
 
 
 def _apply_target_rr(
@@ -585,6 +645,7 @@ def _dbscan_sr_levels(
     k: float = 0.2,
     min_samples: int = 3,
     order: int = 5,
+    atr_series=None,
 ) -> np.ndarray:
     """Compute volume-weighted Support/Resistance levels via DBSCAN clustering.
 
@@ -602,6 +663,9 @@ def _dbscan_sr_levels(
         min_samples: Minimum number of touches required to form a valid cluster;
             isolated wicks are labelled as noise (-1) and discarded.
         order: Sensitivity for swing-point extraction (see ``_extract_extrema``).
+        atr_series: Optional precomputed ATR series (from ``_atr_series``). When
+            provided it is reused instead of recomputing ATR, avoiding a redundant
+            calculation when the caller already has one.
 
     Returns:
         Sorted array of volume-weighted S/R levels, or an empty array if there is
@@ -613,10 +677,9 @@ def _dbscan_sr_levels(
 
     # 1. Dynamically derive the DBSCAN eps threshold from market volatility.
     if method == "atr":
-        current_atr_series = ta.atr(
-            df['High'], df['Low'], df['Close'], length=14
-        )
-        baseline_volatility = float(current_atr_series.dropna().mean())
+        if atr_series is None:
+            atr_series = _atr_series(df, atr_period=14)
+        baseline_volatility = float(atr_series.dropna().mean())
         eps = k * baseline_volatility
     elif method == "mad":
         # scale=1 returns the raw unscaled MAD (robust to outlier wicks).
@@ -688,7 +751,10 @@ def _determine_sl_tp_from_dbscan(
               risk_reward_ratio (as "1:x"), sl_distance, and atr. On failure it
               returns a non-"Valid" status with a human-readable reason.
     """
-    current_atr = _calculate_atr(df, atr_period=atr_period)
+    # Compute ATR once and reuse it both for the current value (below) and as
+    # the DBSCAN eps baseline, so we never call ta.atr twice on the same data.
+    atr_series = _atr_series(df, atr_period=atr_period)
+    current_atr = _extract_last(atr_series)
 
     sr_levels = _dbscan_sr_levels(
         df,
@@ -696,6 +762,7 @@ def _determine_sl_tp_from_dbscan(
         k=k,
         min_samples=min_samples,
         order=order,
+        atr_series=atr_series,
     )
     if len(sr_levels) == 0:
         logger.warning("DBSCAN produced no valid S/R clusters; invalidating trade.")
