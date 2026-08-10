@@ -51,7 +51,7 @@ PERIOD = "1mo"
 INTERVAL = "1h"
 
 # SL/TP determination strategies to compare.
-STRATEGIES = ["swings", "vw_kde"]
+STRATEGIES = ["swings", "vw_kde", "dbscan"]
 
 
 async def run_strategy(strategy: str, records: list[dict[str, Any]] | None) -> dict[str, Any]:

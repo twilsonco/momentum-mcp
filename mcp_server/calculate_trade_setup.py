@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from asyncio.log import logger
+import numpy as np
 import pandas as pd
 import pandas_ta as ta
-import numpy as np
-from scipy.stats import gaussian_kde
-from scipy.signal import find_peaks
+from asyncio.log import logger
+from scipy.signal import argrelextrema, find_peaks
+from scipy.stats import gaussian_kde, median_abs_deviation
+from sklearn.cluster import DBSCAN
 from typing import Any
 from mcp_server.data import get_historical_data
 from mcp_server.technicals import _extract_last
@@ -25,7 +26,7 @@ async def _get_symbol_info(symbol: str) -> dict:
     logger.warning(f"Symbol {symbol} validation returned empty response")
     return {}
 
-def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5, strategy: str = "swings"):
+def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, spread: int, atr_period=14, max_spread_factor_of_sl_dist: float = 0.15, digits: int = 5, strategy: str = "swings", strategy_params: dict[str, Any] | None = None):
     """
     Calculates deterministic SL and TP based on ATR, recent swings, and spread limits.
     
@@ -35,7 +36,10 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     direction (str): 'long' or 'short'
     spread (float): Current spread distance (in price terms, e.g., 0.0002 for forex)
     atr_period (int): Period for ATR calculation (default 14)
-    strategy (str): SL/TP determination method: "swings" (default) or "vw_kde".
+    strategy (str): SL/TP determination method: "swings" (default), "vw_kde", or "dbscan".
+    strategy_params (dict | None): Optional per-strategy tuning overrides forwarded to the
+        selected level-determination function. Keys not applicable to a given strategy are
+        ignored. See each strategy's docstring for its supported parameters.
     """
     
     logger.info(f"Calculating trade setup for entry_price={entry_price}, direction={direction}, spread={spread}, atr_period={atr_period}, max_spread_factor_of_sl_dist={max_spread_factor_of_sl_dist}, digits={digits}, strategy={strategy}")
@@ -43,13 +47,15 @@ def calculate_trade_setup(df: pd.DataFrame, entry_price: float, direction: str, 
     if strategy not in _STRATEGIES:
         raise ValueError(f"Unknown strategy '{strategy}'. Valid options: {list(_STRATEGIES)}")
     
-    # Determine SL and TP levels using the selected strategy.
+    # Determine SL and TP levels using the selected strategy, forwarding any
+    # per-strategy tuning parameters (unknown keys are swallowed by **kwargs).
     setup = _STRATEGIES[strategy](
         df,
         entry_price=entry_price,
         direction=direction,
         atr_period=atr_period,
         digits=digits,
+        **(strategy_params or {}),
     )
 
     # Propagate any abort from level determination (e.g. insufficient data).
@@ -126,6 +132,7 @@ def _determine_sl_tp_from_swings(
     direction: str,
     atr_period: int = 14,
     digits: int = 5,
+    **kwargs: Any,
 ) -> dict:
     """Determine SL and TP levels using the default ATR/swing strategy.
 
@@ -365,6 +372,10 @@ def _determine_sl_tp_from_vw_kde(
     direction: str,
     atr_period: int = 14,
     digits: int = 5,
+    resolution: int = 1000,
+    bw_frac: float = 0.10,
+    prominence_frac: float = 0.05,
+    **kwargs: Any,
 ) -> dict:
     """Determine SL and TP levels using Volume-Weighted KDE High Volume Nodes.
 
@@ -377,6 +388,12 @@ def _determine_sl_tp_from_vw_kde(
     valid structural node exists on either side of the current price, the trade
     is invalidated.
 
+    Tunable parameters (via ``strategy_params``):
+        resolution: Number of points in the KDE price grid.
+        bw_frac: KDE bandwidth as a fraction of typical-price std dev. Smaller =
+            more sensitive; larger = smoother/fewer levels.
+        prominence_frac: Minimum peak prominence as a fraction of max density.
+
     Returns:
         dict: On success contains status "Valid" plus stop_loss, take_profit,
               risk_reward_ratio (as "1:x"), sl_distance, and atr. On failure it
@@ -384,7 +401,12 @@ def _determine_sl_tp_from_vw_kde(
     """
     current_atr = _calculate_atr(df, atr_period=atr_period)
 
-    sr_levels = _get_vw_kde_sr_levels(df)
+    sr_levels = _get_vw_kde_sr_levels(
+        df,
+        resolution=resolution,
+        bw_frac=bw_frac,
+        prominence_frac=prominence_frac,
+    )
     if len(sr_levels) == 0:
         logger.warning("VW-KDE produced no prominent High Volume Nodes; invalidating trade.")
         return {
@@ -454,15 +476,264 @@ def _determine_sl_tp_from_vw_kde(
     }
 
 
+def _extract_extrema(df: pd.DataFrame, order: int = 5) -> tuple[np.ndarray, np.ndarray]:
+    """Extract local swing highs and lows with their candle volumes.
+
+    A peak is only a valid swing high if it is higher than the ``order`` candles
+    to its immediate left and right (and symmetrically for swing lows). The price
+    stored for a maximum is the bar's High; for a minimum, the bar's Low. Each is
+    paired with that candle's total volume so downstream clustering can weight by
+    liquidity.
+
+    Args:
+        df: DataFrame containing 'High', 'Low', and 'Volume'.
+        order: Number of candles to each side required to confirm an extremum.
+            Higher values filter noise but require more history.
+
+    Returns:
+        Tuple of (prices, volumes) arrays aligned by index. Empty if no extrema
+        were found or the DataFrame is too short for the requested ``order``.
+    """
+    n = len(df)
+    # argrelextrema needs at least 2*order+1 samples to find any extremum.
+    if n < (2 * order + 1):
+        return np.array([]), np.array([])
+
+    highs = df['High'].to_numpy(dtype=float)
+    lows = df['Low'].to_numpy(dtype=float)
+    volumes = df['Volume'].to_numpy(dtype=float)
+
+    local_max_idx = argrelextrema(highs, np.greater, order=order)[0]
+    local_min_idx = argrelextrema(lows, np.less, order=order)[0]
+
+    # A single index cannot be both a max and a min; union them for iteration.
+    extrema_idx = np.sort(np.unique(np.concatenate((local_max_idx, local_min_idx))))
+
+    prices = []
+    vols = []
+    for idx in extrema_idx:
+        if idx in local_max_idx:
+            prices.append(highs[idx])
+        else:
+            prices.append(lows[idx])
+        vols.append(volumes[idx])
+
+    return np.asarray(prices), np.asarray(vols)
+
+
+def _dbscan_sr_levels(
+    df: pd.DataFrame,
+    method: str = "atr",
+    k: float = 0.2,
+    min_samples: int = 3,
+    order: int = 5,
+) -> np.ndarray:
+    """Compute volume-weighted Support/Resistance levels via DBSCAN clustering.
+
+    Local swing highs/lows are extracted from the OHLCV data, clustered with
+    ``sklearn.cluster.DBSCAN`` using a volatility-adaptive ``eps``, and each valid
+    cluster is collapsed to its volume-weighted average price. This pulls an S/R
+    line toward the specific touch that saw the heaviest trading volume rather than
+    the geometric center of the cluster.
+
+    Args:
+        df: DataFrame containing 'High', 'Low', 'Close', and 'Volume'.
+        method: ``"atr"`` (eps = k * mean ATR over the window) or ``"mad"``
+            (eps = k * median absolute deviation of the extracted swing prices).
+        k: Coefficient multiplier for the eps threshold. Typically 0.1-0.3.
+        min_samples: Minimum number of touches required to form a valid cluster;
+            isolated wicks are labelled as noise (-1) and discarded.
+        order: Sensitivity for swing-point extraction (see ``_extract_extrema``).
+
+    Returns:
+        Sorted array of volume-weighted S/R levels, or an empty array if there is
+        insufficient data / no valid clusters were found.
+    """
+    prices, volumes = _extract_extrema(df, order=order)
+    if len(prices) < min_samples:
+        return np.array([])
+
+    # 1. Dynamically derive the DBSCAN eps threshold from market volatility.
+    if method == "atr":
+        current_atr_series = ta.atr(
+            df['High'], df['Low'], df['Close'], length=14
+        )
+        baseline_volatility = float(current_atr_series.dropna().mean())
+        eps = k * baseline_volatility
+    elif method == "mad":
+        # scale=1 returns the raw unscaled MAD (robust to outlier wicks).
+        mad = median_abs_deviation(prices, scale=1)
+        eps = k * float(mad)
+    else:
+        raise ValueError("Method must be 'atr' or 'mad'")
+
+    # Guard against a perfectly flat historical range producing zero eps.
+    eps = max(eps, 1e-5)
+
+    # 2. Cluster the extremum prices with DBSCAN (needs a 2D column vector).
+    price_matrix = prices.reshape(-1, 1)
+    labels = DBSCAN(eps=eps, min_samples=min_samples).fit_predict(price_matrix)
+
+    # 3. Collapse each valid cluster to its volume-weighted average price.
+    sr_levels: list[float] = []
+    for label in np.unique(labels):
+        if label == -1:
+            continue  # noise (isolated wicks) — not a structural level
+        mask = labels == label
+        cluster_prices = prices[mask]
+        cluster_volumes = volumes[mask]
+
+        total_volume = float(cluster_volumes.sum())
+        if total_volume > 0:
+            vw_price = float(np.sum(cluster_prices * cluster_volumes) / total_volume)
+        else:
+            # Fallback to a simple mean when volume data is missing/zero.
+            vw_price = float(np.mean(cluster_prices))
+        sr_levels.append(vw_price)
+
+    return np.sort(sr_levels)
+
+
+def _determine_sl_tp_from_dbscan(
+    df: pd.DataFrame,
+    entry_price: float,
+    direction: str,
+    atr_period: int = 14,
+    digits: int = 5,
+    method: str = "atr",
+    k: float = 0.2,
+    min_samples: int = 3,
+    order: int = 5,
+    **kwargs: Any,
+) -> dict:
+    """Determine SL and TP levels using DBSCAN volume-weighted S/R clusters.
+
+    This is an alternative level-determination strategy that shares the same
+    signature and return contract as `_determine_sl_tp_from_swings`, making it a
+    drop-in replacement for use by `calculate_trade_setup`.
+
+    Local swing points are clustered with DBSCAN (eps scaled to volatility) into
+    structural S/R levels weighted by volume. For a long, the nearest support
+    cluster below entry acts as SL and the nearest resistance above as TP; these
+    are reversed for a short. If no valid structural level exists on either side of
+    price, the trade is invalidated (downward/upward price discovery or breakout).
+
+    Tunable parameters (via ``strategy_params``):
+        method: ``"atr"`` or ``"mad"`` — how eps is derived from volatility.
+        k: Coefficient multiplier for the eps threshold. Typically 0.1-0.3.
+        min_samples: Minimum touches required to form a valid cluster.
+        order: Sensitivity of swing-point extraction (higher = fewer, more
+            significant swings).
+
+    Returns:
+        dict: On success contains status "Valid" plus stop_loss, take_profit,
+              risk_reward_ratio (as "1:x"), sl_distance, and atr. On failure it
+              returns a non-"Valid" status with a human-readable reason.
+    """
+    current_atr = _calculate_atr(df, atr_period=atr_period)
+
+    sr_levels = _dbscan_sr_levels(
+        df,
+        method=method,
+        k=k,
+        min_samples=min_samples,
+        order=order,
+    )
+    if len(sr_levels) == 0:
+        logger.warning("DBSCAN produced no valid S/R clusters; invalidating trade.")
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": (
+                "No structural volume-weighted support/resistance found "
+                "(insufficient swings or all points labelled as noise)."
+            ),
+        }
+
+    supports = sr_levels[sr_levels < entry_price]
+    resistances = sr_levels[sr_levels > entry_price]
+
+    if direction.lower() == 'long':
+        # Long needs support below (SL) and resistance above (TP).
+        if len(supports) == 0:
+            return {
+                "status": f"Abort: Do not open {direction} position",
+                "reason": (
+                    "No structural support below for Stop Loss. "
+                    "Market is in downward price discovery."
+                ),
+            }
+        if len(resistances) == 0:
+            return {
+                "status": f"Abort: Do not open {direction} position",
+                "reason": (
+                    "No structural resistance above for Take Profit. "
+                    "Market is in a blue-sky breakout."
+                ),
+            }
+        proposed_sl = supports[-1]     # closest support below
+        barrier_price = resistances[0]  # closest resistance above
+    elif direction.lower() == 'short':
+        # Short needs resistance above (SL) and support below (TP).
+        if len(resistances) == 0:
+            return {
+                "status": f"Abort: Do not open {direction} position",
+                "reason": (
+                    "No structural resistance above for Stop Loss. "
+                    "Market is in upward price discovery."
+                ),
+            }
+        if len(supports) == 0:
+            return {
+                "status": f"Abort: Do not open {direction} position",
+                "reason": (
+                    "No structural support below for Take Profit. "
+                    "Market is in freefall."
+                ),
+            }
+        proposed_sl = resistances[0]   # closest resistance above
+        barrier_price = supports[-1]    # closest support below
+    else:
+        raise ValueError("Direction must be 'long' or 'short'")
+
+    sl_distance = abs(entry_price - proposed_sl)
+    barrier_distance = abs(barrier_price - entry_price)
+
+    if sl_distance <= 0 or barrier_distance <= 0:
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": f"Invalid SL ({sl_distance}) or Barrier ({barrier_distance}) distance",
+        }
+
+    final_tp, target_rr = _apply_target_rr(
+        entry_price, direction, sl_distance, barrier_distance
+    )
+
+    if final_tp <= 0 or proposed_sl <= 0:
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": f"Invalid final TP ({final_tp}) or proposed SL ({proposed_sl})",
+        }
+
+    return {
+        "status": "Valid",
+        "stop_loss": round(proposed_sl, digits),
+        "take_profit": round(final_tp, digits),
+        "risk_reward_ratio": f"1:{target_rr}",
+        "sl_distance": round(sl_distance, digits),
+        "atr": current_atr,
+    }
+
+
 # Registry of available SL/TP determination strategies. Each maps a strategy
 # name to the function that computes stop_loss/take_profit levels.
 _STRATEGIES = {
     "swings": _determine_sl_tp_from_swings,
     "vw_kde": _determine_sl_tp_from_vw_kde,
+    "dbscan": _determine_sl_tp_from_dbscan,
 }
 
 
-async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str = "swings", input_records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol_info: dict[str, Any] | None = None, strategy: str = "swings", input_records: list[dict[str, Any]] | None = None, strategy_params: dict[str, Any] | None = None) -> dict[str, Any]:
     
     ticker = ticker.strip().upper()
     
@@ -520,12 +791,12 @@ async def calculate_trade_setups(ticker: str, period: str, interval: str, symbol
     
     # Calculate long setup
     logger.info(f"Calculating long setup for {ticker} (strategy={strategy})")
-    long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, digits=symbol_info["digits"], strategy=strategy)
+    long_setup = calculate_trade_setup(df, symbol_info["bid"], "long", spread, atr_period=14, digits=symbol_info["digits"], strategy=strategy, strategy_params=strategy_params)
     ret["long_buy_setup"] = long_setup
     
     # Calculate short setup
     logger.info(f"Calculating short setup for {ticker} (strategy={strategy})")
-    short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, digits=symbol_info["digits"], strategy=strategy)
+    short_setup = calculate_trade_setup(df, symbol_info["ask"], "short", spread, atr_period=14, digits=symbol_info["digits"], strategy=strategy, strategy_params=strategy_params)
     ret["short_sell_setup"] = short_setup
     
     if all("Abort" in setup.get("status", "") for setup in (long_setup, short_setup)):
