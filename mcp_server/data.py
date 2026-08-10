@@ -21,7 +21,7 @@ import io
 import logging
 import os
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -129,6 +129,57 @@ def _date_range_covers_period(records: list[dict[str, Any]], period: str) -> boo
     
     # Accept if we cover at least 70% of expected calendar days
     return actual_days >= (expected_days * 0.70)
+
+
+# Approximate maximum age (in seconds) for the most recent bar before a dataset
+# is considered stale. The MT5 MCP server intermittently returns candles that are
+# hours/days old even though fresher data exists; without this guard those stale
+# bars get charted and cached, so charts silently miss the latest price action.
+#
+# We use a deliberately generous threshold (e.g. 4x the bar interval) because:
+#   - During market closures / weekends the newest completed bar is naturally old.
+#   - A just-forming intraday candle may lag "now" by up to one full bar length.
+_MAX_BAR_AGE_SECONDS = {
+    # intraday: allow a few bars of slack
+    "1m": 4 * 60, "2m": 8 * 120, "5m": 6 * 300,
+    "15m": 6 * 900, "30m": 6 * 1800, "60m": 6 * 3600, "90m": 3 * 5400,
+    # daily and above: allow ~4 calendar days (covers weekends + holidays)
+    "1d": 5 * 86400, "5d": 8 * 43200, "1wk": 10 * 604800,
+    "1mo": 40 * 2592000, "3mo": 60 * 7776000,
+}
+
+
+def _is_data_fresh(records: list[dict[str, Any]], interval: str) -> bool:
+    """Return True if the most recent bar is not stale relative to now.
+
+    MT5 (and occasionally other sources) can return a dataset whose newest
+    candle predates "now" by far more than one bar — e.g. Friday's last candle
+    when Monday data already exists, or even several days back. Detecting this
+    lets the caller retry / fall back instead of charting stale price action.
+
+    The threshold is intentionally loose (see ``_MAX_BAR_AGE_SECONDS``) so that
+    weekend and holiday closures don't trip it.
+    """
+    if not records:
+        return False
+
+    from dateutil import parser as _parser
+    try:
+        last_dt = _parser.parse(records[-1]["date"])
+    except Exception:
+        # Can't parse the timestamp — assume fresh rather than block on a format quirk.
+        return True
+
+    max_age = _MAX_BAR_AGE_SECONDS.get(interval, 5 * 86400)
+    age = datetime.now(timezone.utc) - last_dt
+    if age.total_seconds() <= max_age:
+        return True
+
+    logger.warning(
+        "Stale data detected for interval=%s: newest bar %s is %.1fh old (max allowed %.1fh).",
+        interval, records[-1]["date"], age.total_seconds() / 3600.0, max_age / 3600.0,
+    )
+    return False
 
 
 def _is_source_available(source: str) -> bool:
@@ -349,65 +400,84 @@ def _fetch_from_yfinance(
 async def _fetch_from_mt5(
     ticker: str, period: str, interval: str
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV from the MetaTrader MCP server. Raises ValueError on failure."""
+    """Fetch OHLCV from the MetaTrader MCP server. Raises ValueError on failure.
+
+    The MT5 MCP server intermittently returns stale candles (newest bar hours or
+    days old even when fresher data exists). Because that staleness is transient,
+    we retry a few times and only raise if every attempt comes back stale.
+    """
     mt5_tf = _INTERVAL_TO_MT5.get(interval)
     if mt5_tf is None:
         raise ValueError(f"MetaTrader MCP does not support interval '{interval}'")
 
     count = _period_to_count(period, interval)
 
-    try:
-        result = await call_mt5_tool(
-            "get_candles_latest",
-            {"symbol_name": ticker, "timeframe": mt5_tf, "count": count},
+    attempts = 3
+    last_error: str | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            result = await call_mt5_tool(
+                "get_candles_latest",
+                {"symbol_name": ticker, "timeframe": mt5_tf, "count": count},
+            )
+        except Exception as exc:
+            raise ValueError(f"MetaTrader MCP failed for '{ticker}': {exc}") from exc
+
+        # Extract CSV text from the response
+        csv_text: str | None = None
+        for content in result.content:
+            if hasattr(content, "text"):
+                csv_text = content.text
+                break
+        if not csv_text:
+            raise ValueError(f"MetaTrader MCP returned empty response for '{ticker}'")
+
+        # Parse CSV — columns: ,time,open,high,low,close,tick_volume,spread,real_volume
+        try:
+            df = pd.read_csv(io.StringIO(csv_text))
+        except Exception as exc:
+            raise ValueError(f"MetaTrader MCP CSV parse failed for '{ticker}': {exc}") from exc
+
+        if df is None or df.empty:
+            raise ValueError(f"MetaTrader MCP returned no data for '{ticker}'")
+
+        records: list[dict[str, Any]] = []
+        for _, row in df.iterrows():
+            # Normalize timestamp to ISO-8601
+            ts = row.get("time")
+            if pd.isna(ts):
+                continue
+            ts_str = str(ts)
+            # Convert "2026-07-22 00:00:00+00:00" → "2026-07-22T00:00:00+00:00"
+            if " " in ts_str and "T" not in ts_str:
+                ts_str = ts_str.replace(" ", "T", 1)
+
+            records.append(
+                {
+                    "date": ts_str,
+                    "open": _round(row.get("open")),
+                    "high": _round(row.get("high")),
+                    "low": _round(row.get("low")),
+                    "close": _round(row.get("close")),
+                    "volume": _safe_int(row.get("tick_volume", 0)),
+                    "source": "mt5_mcp",
+                }
+            )
+
+        # Sort ascending by date (MT5 returns newest-first)
+        records.sort(key=lambda r: r["date"])
+
+        if _is_data_fresh(records, interval):
+            return records
+
+        last_error = (
+            f"MetaTrader MCP returned stale data for '{ticker}' "
+            f"(newest bar {records[-1]['date']}, attempt {attempt}/{attempts})"
         )
-    except Exception as exc:
-        raise ValueError(f"MetaTrader MCP failed for '{ticker}': {exc}") from exc
+        logger.warning("%s — retrying...", last_error)
 
-    # Extract CSV text from the response
-    csv_text: str | None = None
-    for content in result.content:
-        if hasattr(content, "text"):
-            csv_text = content.text
-            break
-    if not csv_text:
-        raise ValueError(f"MetaTrader MCP returned empty response for '{ticker}'")
-
-    # Parse CSV — columns: ,time,open,high,low,close,tick_volume,spread,real_volume
-    try:
-        df = pd.read_csv(io.StringIO(csv_text))
-    except Exception as exc:
-        raise ValueError(f"MetaTrader MCP CSV parse failed for '{ticker}': {exc}") from exc
-
-    if df is None or df.empty:
-        raise ValueError(f"MetaTrader MCP returned no data for '{ticker}'")
-
-    records: list[dict[str, Any]] = []
-    for _, row in df.iterrows():
-        # Normalize timestamp to ISO-8601
-        ts = row.get("time")
-        if pd.isna(ts):
-            continue
-        ts_str = str(ts)
-        # Convert "2026-07-22 00:00:00+00:00" → "2026-07-22T00:00:00+00:00"
-        if " " in ts_str and "T" not in ts_str:
-            ts_str = ts_str.replace(" ", "T", 1)
-
-        records.append(
-            {
-                "date": ts_str,
-                "open": _round(row.get("open")),
-                "high": _round(row.get("high")),
-                "low": _round(row.get("low")),
-                "close": _round(row.get("close")),
-                "volume": _safe_int(row.get("tick_volume", 0)),
-                "source": "mt5_mcp",
-            }
-        )
-
-    # Sort ascending by date (MT5 returns newest-first)
-    records.sort(key=lambda r: r["date"])
-    return records
+    raise ValueError(last_error or "MetaTrader MCP returned stale data")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
