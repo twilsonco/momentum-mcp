@@ -46,6 +46,10 @@ ALLOWED_SYMBOL_MARKETS = [
 
 ALLOWED_CRYPTOS = [r".*USD"]
 
+DISALLOWED_SYMBOLS = [
+    "NEOUSD"
+]
+
 ALL_INTERVALS = ["1m", "2m", "5m", "15m", "30m", "60m", "90m",
     "1h", "1d", "5d", "1wk", "1mo", "3mo",]
 
@@ -774,7 +778,7 @@ async def pick_market(
     available_candidates: list[tuple[str, str]] = []
     for market, symbols in symbols_by_market.items():
         for symbol in symbols:
-            if symbol not in open_symbols:
+            if symbol not in open_symbols and symbol.upper() not in DISALLOWED_SYMBOLS:
                 available_candidates.append((market, symbol))
     
     if not available_candidates:
