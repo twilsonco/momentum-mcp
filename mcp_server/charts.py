@@ -202,7 +202,7 @@ async def generate_chart(
     risk_reward: float | None = None
 
     if entry_price is not None:
-        trade_levels.append((entry_price, "#3b82f6", "-", f"Entry ${entry_price:.2f}"))
+        trade_levels.append((entry_price, "#3b82f6", "-", f"Entry ${entry_price:.3f}"))
 
         if stop_loss_price is not None and take_profit_price is not None:
             # Auto-detect direction from price relationships
@@ -218,10 +218,10 @@ async def generate_chart(
             risk_reward = reward / risk if risk > 0 else None
 
         if stop_loss_price is not None:
-            trade_levels.append((stop_loss_price, "#ef4444", "--", f"Stop ${stop_loss_price:.2f}"))
+            trade_levels.append((stop_loss_price, "#ef4444", "--", f"Stop ${stop_loss_price:.3f}"))
 
         if take_profit_price is not None:
-            trade_levels.append((take_profit_price, "#22c55e", "--", f"TP ${take_profit_price:.2f}"))
+            trade_levels.append((take_profit_price, "#22c55e", "--", f"TP ${take_profit_price:.3f}"))
 
     # Build DataFrame in mplfinance-expected format
     df = pd.DataFrame(records)
@@ -270,11 +270,11 @@ async def generate_chart(
         # for the same ticker/period/interval don't overwrite each other
         suffix_parts: list[str] = []
         if entry_price is not None:
-            suffix_parts.append(f"e{entry_price:.2f}")
+            suffix_parts.append(f"e{entry_price:.3f}")
         if stop_loss_price is not None:
-            suffix_parts.append(f"s{stop_loss_price:.2f}")
+            suffix_parts.append(f"s{stop_loss_price:.3f}")
         if take_profit_price is not None:
-            suffix_parts.append(f"t{take_profit_price:.2f}")
+            suffix_parts.append(f"t{take_profit_price:.3f}")
         if file_name_suffix:
             suffix_parts.append(file_name_suffix)
         if suffix_parts:
@@ -335,7 +335,7 @@ async def generate_chart(
                 )
                 # Price label on the right side of the chart
                 axes[0].text(
-                    0.99, price, f" ${price:.2f} ",
+                    0.99, price, f" ${price:.3f} ",
                     transform=axes[0].get_yaxis_transform(),
                     color=color, fontsize=7, fontweight="bold",
                     ha="right", va="center",

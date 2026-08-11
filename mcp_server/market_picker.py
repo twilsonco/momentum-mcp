@@ -829,31 +829,27 @@ async def pick_market(
         else:
             chart_data = None
         
-        position_size_long = None
-        if "Abort" not in trade_setups["long_buy_setup"].get("status", ""):
-            position_size_long = await calculate_mt5_position_size(symbol,
-                "long", 
-                trade_setups["long_buy_setup"]["entry"],
-                trade_setups["long_buy_setup"]["stop_loss"]
-            )
-            print(position_size_long)
-            trade_setups["long_buy_setup"]["position_risk"] = {"position_lots": position_size_long.data["position_lots"], "actual_risk": position_size_long.data["actual_risk"], "actual_risk_pct": position_size_long.data["actual_risk_pct"]}
-            trade_setup_long = trade_setups["long_buy_setup"]
-            chart_data_long = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records, entry_price=trade_setup_long["entry"], stop_loss_price=trade_setup_long["stop_loss"], take_profit_price=trade_setup_long["take_profit"])
-            trade_setups["long_buy_setup"]["chart_path"] = chart_data_long["path"]
-        
-        position_size_short = None
-        if "Abort" not in trade_setups["short_sell_setup"].get("status", ""):
-            position_size_short = await calculate_mt5_position_size(symbol, 
-                "short", 
-                trade_setups["short_sell_setup"]["entry"],
-                trade_setups["short_sell_setup"]["stop_loss"]
-            )
-            print(position_size_short)
-            trade_setups["short_sell_setup"]["position_risk"] = {"position_lots": position_size_short.data["position_lots"], "actual_risk": position_size_short.data["actual_risk"], "actual_risk_pct": position_size_short.data["actual_risk_pct"]}
-            trade_setup_short = trade_setups["short_sell_setup"]
-            chart_data_short = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records, entry_price=trade_setup_short["entry"], stop_loss_price=trade_setup_short["stop_loss"], take_profit_price=trade_setup_short["take_profit"])
-            trade_setups["short_sell_setup"]["chart_path"] = chart_data_short["path"]
+        for setup_key, direction in (("long_buy_setup", "long"), ("short_sell_setup", "short")):
+            if "Abort" not in trade_setups[setup_key].get("status", ""):
+                position_size = await calculate_mt5_position_size(
+                    symbol,
+                    direction,
+                    trade_setups[setup_key]["entry"],
+                    trade_setups[setup_key]["stop_loss"]
+                )
+                print(position_size)
+                trade_setups[setup_key]["position_risk"] = {
+                    "position_lots": position_size.data["position_lots"],
+                    "actual_risk": position_size.data["actual_risk"],
+                    "actual_risk_pct": position_size.data["actual_risk_pct"]
+                }
+                chart_data = await _generate_chart(
+                    symbol, interval=interval, period=timeframe[1], input_records=records,
+                    entry_price=trade_setups[setup_key]["entry"],
+                    stop_loss_price=trade_setups[setup_key]["stop_loss"],
+                    take_profit_price=trade_setups[setup_key]["take_profit"]
+                )
+                trade_setups[setup_key][f"{direction}_chart_path"] = chart_data["path"]
         print(trade_setups)
         
         picked_symbol = symbol
