@@ -179,3 +179,13 @@ async def fetch_mt5_account_info(timeout: float = 5.0) -> dict[str, Any] | None:
 async def fetch_mt5_symbol_info(symbol: str, timeout: float = 15.0) -> dict[str, Any] | None:
     """Fetch symbol info dict from MT5 MCP."""
     return await fetch_mt5_tool_json("get_symbol_info", {"symbol_name": symbol}, timeout=timeout)
+
+
+async def fetch_mt5_symbol_price(symbol: str, timeout: float = 15.0) -> dict[str, Any] | None:
+    """Fetch the latest price tick dict from MT5 MCP's ``get_symbol_price`` tool.
+
+    Returns a dict with keys like ``bid``, ``ask``, ``last``, ``volume`` and
+    ``time`` (when available), or ``None`` on any failure (not configured,
+    timeout, connection error, non-JSON/empty response).
+    """
+    return await fetch_mt5_tool_json("get_symbol_price", {"symbol_name": symbol}, timeout=timeout)

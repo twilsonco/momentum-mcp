@@ -420,7 +420,26 @@ def _build_scorecard_summary(
 # ---------------------------------------------------------------------------
 
 async def _fetch_price(ticker: str) -> float | None:
-    """Fetch latest price for a ticker. Uses shared get_live_price helper."""
+    """Fetch latest price for a ticker.
+
+    Primary source is the MetaTrader MCP ``get_symbol_price`` tool (real-time
+    bid/ask/last from MT5). Falls back to yfinance's shared ``get_live_price``
+    helper when MT5 isn't configured or returns no usable quote.
+    """
+    try:
+        from mcp_server.utils.mt5_mcp_server import is_mt5_configured, fetch_mt5_symbol_price
+
+        if is_mt5_configured():
+            tick = await fetch_mt5_symbol_price(ticker)
+            # Prefer the last trade price; fall back to bid/ask midpoint.
+            for key in ("last", "bid", "ask"):
+                val = tick.get(key) if isinstance(tick, dict) else None
+                if isinstance(val, (int, float)) and val > 0:
+                    return float(val)
+    except Exception as e:
+        logger.warning("MT5 price fetch failed for %s: %s", ticker, e)
+
+    # Fallback to yfinance via the shared helper.
     try:
         from mcp_server.data import get_live_price
         return await get_live_price(ticker)
