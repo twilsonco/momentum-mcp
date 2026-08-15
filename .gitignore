@@ -22,6 +22,10 @@ Thumbs.db
 # Generated charts
 charts/
 
+# Log files (generated at runtime)
+logs/
+*.log
+
 # Distribution
 dist/
 build/

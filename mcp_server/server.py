@@ -11,7 +11,9 @@ the FastAPI brain via `app.mount("/mcp", mcp.sse_app())`.
 from __future__ import annotations
 
 import logging
+import os
 import warnings
+from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
@@ -24,7 +26,6 @@ warnings.filterwarnings("ignore", message="Attempted to exit cancel scope in a d
 
 # Also suppress asyncio async generator cleanup errors
 import asyncio
-import sys
 
 def _suppress_anyio_cleanup_errors(loop, context):
     """Suppress anyio cancel scope and async generator cleanup errors."""
@@ -120,6 +121,29 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+# ── Rotating file handler for logs/momentum.log (10MB cap) ───────────
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "logs")
+os.makedirs(_LOG_DIR, exist_ok=True)
+_file_handler = RotatingFileHandler(
+    os.path.join(_LOG_DIR, "momentum.log"),
+    maxBytes=10 * 1024 * 1024,  # 10 MB
+    backupCount=3,
+    encoding="utf-8",
+)
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(
+    logging.Formatter(
+        fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+)
+# Attach the file handler to the root logger so ALL modules (including market_picker) write there too
+for _handler in logging.getLogger().handlers:
+    if getattr(_handler, "baseFilename", "").endswith("momentum.log"):
+        break
+else:
+    logging.getLogger().addHandler(_file_handler)
 
 # ── FastMCP server instance ──────────────────────────────────────────────────
 mcp = FastMCP(
