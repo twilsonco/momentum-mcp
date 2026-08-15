@@ -102,6 +102,23 @@ def _evaluate_strategy(
 
     # Recompute the discrete RR from the (possibly capped) distances.
     tp_distance = abs(final_tp - entry_price)
+
+    # Guard against a non-finite/zero SL distance (e.g. ATR was NaN). Dividing
+    # by it would emit "RuntimeWarning: invalid value encountered in scalar
+    # divide" and yield an unusable setup, so abort instead.
+    if not np.isfinite(sl_distance) or sl_distance <= 0:
+        logger.warning(
+            f"Invalid SL distance ({sl_distance}) after capping; "
+            f"invalidating {direction} trade."
+        )
+        return {
+            "status": f"Abort: Do not open {direction} position",
+            "reason": (
+                f"Invalid SL distance ({sl_distance}); cannot compute a valid "
+                f"{direction} risk/reward setup."
+            ),
+        }
+
     target_rr = round(min(tp_distance / sl_distance, 3.0), 2)
 
     proposed_sl = round(proposed_sl, digits)
@@ -229,6 +246,12 @@ def _apply_target_rr(
         at least 1:1, forces a 1:1 target.
     """
     # Ratios available: 1, 2, or 3
+    # Guard against a non-finite/zero SL distance (e.g. ATR was NaN). Dividing
+    # by it would emit "RuntimeWarning: invalid value encountered in scalar
+    # divide"; force the safest discrete target instead.
+    if not np.isfinite(sl_distance) or sl_distance <= 0:
+        return entry_price, 1
+
     if barrier_distance < sl_distance:
         # Force 1:1 if structural barrier doesn't allow it
         target_rr = 1
@@ -373,7 +396,8 @@ def _determine_sl_tp_from_swings(
         
     logger.info(f"Barrier Price: {barrier_price}, Barrier Distance: {barrier_distance}")
 
-    if sl_distance <= 0 or barrier_distance <= 0:
+    if not np.isfinite(sl_distance) or sl_distance <= 0 \
+            or not np.isfinite(barrier_distance) or barrier_distance <= 0:
         logger.warning(f"Invalid SL or Barrier distance. SL Distance: {sl_distance}, Barrier Distance: {barrier_distance}")
         return {
             "status": f"Abort: Do not open {direction} position",
@@ -468,6 +492,18 @@ def _get_vw_kde_sr_levels(
     # Absolute bandwidth scaled to the price range so results are consistent
     # regardless of instrument price magnitude.
     bw_abs = float(np.nanstd(prices)) * bw_frac
+
+    # Guard against a flat (zero variance) or NaN price series. A zero/NaN
+    # bandwidth makes scipy's gaussian_kde divide by it internally, emitting a
+    # "RuntimeWarning: invalid value encountered in scalar divide". There is no
+    # meaningful structure to extract from such data, so bail out cleanly.
+    if not np.isfinite(bw_abs) or bw_abs <= 0:
+        logger.warning(
+            f"VW-KDE bandwidth invalid ({bw_abs}); flat/NaN price series; "
+            "invalidating trade."
+        )
+        return np.array([])
+
     kde = gaussian_kde(prices, weights=weights, bw_method=bw_abs)
     price_grid = np.linspace(
         float(np.nanmin(df['Low'])),
@@ -568,7 +604,8 @@ def _determine_sl_tp_from_vw_kde(
     sl_distance = abs(entry_price - proposed_sl)
     barrier_distance = abs(barrier_price - entry_price)
 
-    if sl_distance <= 0 or barrier_distance <= 0:
+    if not np.isfinite(sl_distance) or sl_distance <= 0 \
+            or not np.isfinite(barrier_distance) or barrier_distance <= 0:
         return {
             "status": f"Abort: Do not open {direction} position",
             "reason": f"Invalid SL ({sl_distance}) or Barrier ({barrier_distance}) distance",
@@ -823,7 +860,8 @@ def _determine_sl_tp_from_dbscan(
     sl_distance = abs(entry_price - proposed_sl)
     barrier_distance = abs(barrier_price - entry_price)
 
-    if sl_distance <= 0 or barrier_distance <= 0:
+    if not np.isfinite(sl_distance) or sl_distance <= 0 \
+            or not np.isfinite(barrier_distance) or barrier_distance <= 0:
         return {
             "status": f"Abort: Do not open {direction} position",
             "reason": f"Invalid SL ({sl_distance}) or Barrier ({barrier_distance}) distance",
