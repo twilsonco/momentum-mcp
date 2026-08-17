@@ -36,6 +36,11 @@ from mcp_server.utils.mt5_mcp_server import (
 
 load_dotenv()
 
+# Silence the noisy per-request INFO logs emitted by httpx/httpcore (used
+# internally by the MT5 MCP client). Keep WARNING+ so real errors still surface.
+for _lib_logger in ("httpx", "httpcore"):
+    logging.getLogger(_lib_logger).setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 TZ = "America/Denver"
@@ -847,13 +852,13 @@ async def pick_market(
                     "actual_risk": position_size.data["actual_risk"],
                     "actual_risk_pct": position_size.data["actual_risk_pct"]
                 }
-                chart_data = await _generate_chart(
+                tmp_chart_data = await _generate_chart(
                     symbol, interval=interval, period=timeframe[1], input_records=records,
                     entry_price=trade_setups[setup_key]["entry"],
                     stop_loss_price=trade_setups[setup_key]["stop_loss"],
                     take_profit_price=trade_setups[setup_key]["take_profit"]
                 )
-                trade_setups[setup_key][f"{direction}_chart_path"] = chart_data["path"]
+                trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
         print(trade_setups)
         
         picked_symbol = symbol
