@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 TZ = "America/Denver"
 
 ALLOWED_SYMBOL_MARKETS = [
-    "Futures", "FX Crosses", "Energy", "Metals", "FM Majors", "Indices", "Cryptos"
+    "Futures", "FX Crosses", "Energy", "Metals", "FX Majors", "Indices", "Cryptos"
 ]
 
 ALLOWED_CRYPTOS = [r".*USD"]
@@ -171,12 +171,12 @@ MARKET_HOURS = {
 }
 
 MARKET_ADJUSTMENTS = {
-    "Crypto": """- Frequent liquidity hunts break recent swing levels; use 2x to 2.5x ATR buffer on shorter timeframes.
+    "Cryptos": """- Frequent liquidity hunts break recent swing levels; use 2x to 2.5x ATR buffer on shorter timeframes.
 - Validate spread tolerance strictly; spreads widen during low-volume periods.""",
-    "FX_majors": """- Respect support and resistance cleanly during Asian session; breaks occur during London/New York overlap.
+    "FX Majors": """- Respect support and resistance cleanly during Asian session; breaks occur during London/New York overlap.
 - Avoid placing SLs at round numbers where central banks defend.
 - SL buffer: 1.5x ATR standard; increase to 2x ATR during high-impact news windows.""",
-    "FX_minors": """- Tighter trading ranges and lower volume; wider spreads during Asian/early European sessions.
+    "FX Crosses": """- Tighter trading ranges and lower volume; wider spreads during Asian/early European sessions.
 - Prioritize entries during London/New York open for tighter fills.
 - Commodity-linked minors spike on commodity price shocks; monitor correlation pairs.
 - Use 1.5x to 2x ATR for SL buffer; be conservative on position sizing.""",
