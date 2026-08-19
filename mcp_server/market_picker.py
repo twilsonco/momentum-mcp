@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 TZ = "America/Denver"
 
 ALLOWED_SYMBOL_MARKETS = [
-    "Futures", "FX Crosses", "Energy", "Metals", "FX Majors", "Indices", "Cryptos"
+    "Futures", "FX Crosses", "Energy", "Metals", "FX Majors", "Cryptos"
 ]
 
 ALLOWED_CRYPTOS = [r".*USD"]
