@@ -83,12 +83,20 @@ _STYLE = mpf.make_mpf_style(
 
 # EMA overlay configuration: (period, color, label)
 _EMA_STACK = [
-    (8,  "#00d4ff", "EMA 8"),   # cyan
-    (21, "#22c55e", "EMA 21"),  # green
-    (34, "#eab308", "EMA 34"),  # yellow
-    (55, "#f97316", "EMA 55"),  # orange
-    (89, "#ef4444", "EMA 89"),  # red
+    (25,  "#00d4ff", "EMA 8"),   # cyan
+    (50, "#22c55e", "EMA 21"),  # green
+    (100, "#eab308", "EMA 34"),  # yellow
+    (200, "#ef4444", "EMA 89"),  # red
 ]
+
+# # EMA overlay configuration: (period, color, label)
+# _EMA_STACK = [
+#     (8,  "#00d4ff", "EMA 8"),   # cyan
+#     (21, "#22c55e", "EMA 21"),  # green
+#     (34, "#eab308", "EMA 34"),  # yellow
+#     (55, "#f97316", "EMA 55"),  # orange
+#     (89, "#ef4444", "EMA 89"),  # red
+# ]
 
 
 async def generate_chart(
