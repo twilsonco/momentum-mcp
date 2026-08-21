@@ -368,12 +368,26 @@ def _is_market_open(symbol: str, market: str, now_utc: datetime) -> bool:
             if weekday >= 5:  # Saturday or Sunday
                 return False
             
+            # Adjust hours for early Friday closure and late Monday opening
+            adjusted_open_hour = hours["open_hour"]
+            adjusted_open_minute = hours["open_minute"]
+            adjusted_close_hour = hours["close_hour"]
+            adjusted_close_minute = hours["close_minute"]
+            
+            # On Monday, open 3 hours later than usual
+            if weekday == 0:
+                adjusted_open_hour += 3
+            
+            # On Friday, close 3 hours earlier than usual
+            if weekday == 4:
+                adjusted_close_hour -= 3
+            
             # Convert session times from local to UTC
             open_utc_h, open_utc_m = _convert_local_time_to_utc(
-                now_utc, tz_name, hours["open_hour"], hours["open_minute"]
+                now_utc, tz_name, adjusted_open_hour, adjusted_open_minute
             )
             close_utc_h, close_utc_m = _convert_local_time_to_utc(
-                now_utc, tz_name, hours["close_hour"], hours["close_minute"]
+                now_utc, tz_name, adjusted_close_hour, adjusted_close_minute
             )
             
             open_minutes = open_utc_h * 60 + open_utc_m
@@ -414,17 +428,20 @@ def _is_market_open(symbol: str, market: str, now_utc: datetime) -> bool:
                     if now_minutes >= break_start_minutes or now_minutes < break_end_minutes:
                         return False
             
-            # Check for weekly closure (Friday close around 22:00 UTC)
-            # Global Weekend Closure: Friday 22:00 UTC -> Sunday 22:00 UTC
-            if (weekday == 4 and hour >= 22) or (weekday == 5) or (weekday == 6 and hour < 22):
+            # Global Weekend Closure with 3-hour buffers:
+            # Close 3 hours early on Friday (18:00 UTC instead of 21:00 UTC)
+            # Open 3 hours late on Monday (03:00 UTC instead of 21:00 UTC Sunday)
+            if (weekday == 4 and hour >= 18) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 3):
                 return False
             
             return True
     
     # Fallback for symbols not in MARKET_HOURS (Forex, Metals)
 
-    # Global Weekend Closure: Friday 21:00 UTC -> Sunday 21:00 UTC
-    if (weekday == 4 and hour >= 21) or (weekday == 5) or (weekday == 6 and hour < 21):
+    # Global Weekend Closure with 3-hour buffers:
+    # Close 3 hours early on Friday (18:00 UTC instead of 21:00 UTC)
+    # Open 3 hours late on Monday (03:00 UTC instead of 21:00 UTC Sunday)
+    if (weekday == 4 and hour >= 18) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 3):
         return False
 
     # Daily rollover break for some asset classes (conservative approach)
