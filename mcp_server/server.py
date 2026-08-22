@@ -112,7 +112,11 @@ from mcp_server.bubble import detect_bubble_risk as _detect_bubble_risk
 
 from mcp_server.alpha_cards import generate_alpha_card as _generate_alpha_card
 from mcp_server.warmer import get_alpha_signals as _get_alpha_signals, WARM_TICKERS
-from mcp_server.market_picker import pick_market as _pick_market, INTERVALS
+from mcp_server.market_picker import (
+    pick_market as _pick_market,
+    get_open_positions as _get_open_positions,
+    INTERVALS,
+)
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -309,6 +313,24 @@ async def pick_market(
         minimum_margin_percent=minimum_margin_percent,
         intervals=intervals,
     )
+
+
+@mcp.tool()
+async def get_open_positions(
+    losing_positions_only: bool = False,
+) -> dict[str, Any]:
+    """Fetch currently open MetaTrader positions whose markets are actually open.
+
+    Returns a list of position dicts with ``symbol``, ``position_id`` (ticket),
+    ``comment`` (entry order comment), and ``unrealized_profit`` (current
+    floating P/L). Only positions in markets that are currently open for trading
+    are returned — closed/off-hours markets are excluded.
+
+    Args:
+        losing_positions_only: If True, return only positions that currently
+            have an unrealized loss (negative floating profit). Defaults to False.
+    """
+    return await _get_open_positions(losing_positions_only=losing_positions_only)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

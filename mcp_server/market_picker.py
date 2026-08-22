@@ -13,6 +13,8 @@ Exposes as a single MCP tool: `pick_market`
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import logging
 import random
 import re
@@ -428,20 +430,20 @@ def _is_market_open(symbol: str, market: str, now_utc: datetime) -> bool:
                     if now_minutes >= break_start_minutes or now_minutes < break_end_minutes:
                         return False
             
-            # Global Weekend Closure with 3-hour buffers:
-            # Close 3 hours early on Friday (18:00 UTC instead of 21:00 UTC)
-            # Open 3 hours late on Monday (03:00 UTC instead of 21:00 UTC Sunday)
-            if (weekday == 4 and hour >= 18) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 3):
+            # Global Weekend Closure with 2-hour buffers:
+            # Close 2 hours early on Friday (19:00 UTC instead of 21:00 UTC)
+            # Open 2 hours late on Monday (05:00 UTC instead of 03:00 UTC)
+            if (weekday == 4 and hour >= 19) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 5):
                 return False
             
             return True
     
     # Fallback for symbols not in MARKET_HOURS (Forex, Metals)
 
-    # Global Weekend Closure with 3-hour buffers:
-    # Close 3 hours early on Friday (18:00 UTC instead of 21:00 UTC)
-    # Open 3 hours late on Monday (03:00 UTC instead of 21:00 UTC Sunday)
-    if (weekday == 4 and hour >= 18) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 3):
+    # Global Weekend Closure with 2-hour buffers:
+    # Close 2 hours early on Friday (19:00 UTC instead of 21:00 UTC)
+    # Open 2 hours late on Monday (05:00 UTC instead of 03:00 UTC)
+    if (weekday == 4 and hour >= 19) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 5):
         return False
 
     # Daily rollover break for some asset classes (conservative approach)
@@ -485,6 +487,126 @@ async def _get_open_position_symbols() -> set[str]:
             return symbols
 
     return set()
+
+
+async def _get_open_position_comments() -> dict[str, str]:
+    """Map position_id -> comment by scanning MT5 order history.
+
+    ``get_all_positions`` does not include the order comment, so we pull it
+    from the historical orders feed (which carries a ``position_id`` and a
+    ``comment`` column) to enrich each open position with its original entry
+    comment. Returns an empty dict if MT5 MCP is unavailable.
+
+    Returns:
+        Dict mapping position id (str) -> order comment.
+    """
+    result = await call_mt5_tool("get_orders", {}, timeout=10.0)
+    comments: dict[str, str] = {}
+    if not result or not getattr(result, "content", None):
+        return comments
+
+    for content in result.content:
+        text = getattr(content, "text", "")
+        rows = list(csv.reader(io.StringIO(text or "")))
+        # Header: time_setup,ticket,...,position_id,...,symbol,comment,external_id
+        header = [h.strip() for h in (rows[0] if rows else [])]
+        try:
+            pos_idx = header.index("position_id")
+            comment_idx = header.index("comment")
+        except ValueError:
+            continue
+        for row in rows[1:]:
+            if len(row) <= max(pos_idx, comment_idx):
+                continue
+            pos_id = row[pos_idx].strip()
+            comment = row[comment_idx].strip()
+            if pos_id and not comments.get(pos_id):
+                comments[pos_id] = comment
+
+    logger.debug(f"Resolved {len(comments)} position comments from order history")
+    return comments
+
+
+async def get_open_positions(
+    losing_positions_only: bool = False,
+) -> dict[str, Any]:
+    """Fetch currently open MetaTrader positions whose markets are actually open.
+
+    Returns a list of dicts with ``symbol``, ``position_id`` (ticket),
+    ``comment`` (entry order comment), and ``unrealized_profit`` (current
+    floating P/L). Only positions in markets that are currently open for trading
+    are returned. When ``losing_positions_only`` is True, only those with a
+    negative unrealized profit are additionally included.
+
+    Args:
+        losing_positions_only: If True, return only positions that currently
+            have an unrealized loss (negative floating profit). Defaults to False.
+
+    Returns:
+        Dict with keys ``positions`` (list of position dicts) and ``count``.
+        An empty list is returned if MT5 MCP is unavailable or there are no
+        open/tradeable positions.
+    """
+    result = await call_mt5_tool("get_all_positions", {}, timeout=5.0)
+    if not result or not getattr(result, "content", None):
+        return {"positions": [], "count": 0}
+
+    comments = await _get_open_position_comments()
+
+    # Build symbol -> market map so we can determine which markets are open.
+    symbols_by_market = await _fetch_mt5_symbols()
+    symbol_to_market: dict[str, str] = {}
+    if symbols_by_market:
+        for market, syms in symbols_by_market.items():
+            for s in syms:
+                symbol_to_market[s.upper()] = market
+
+    now_utc = datetime.now(timezone.utc)
+
+    positions: list[dict[str, Any]] = []
+    for content in result.content:
+        text = getattr(content, "text", "")
+        rows = list(csv.reader(io.StringIO(text or "")))
+        # Header: ,id,time,symbol,type,volume,open,stop_loss,take_profit,profit
+        header = [h.strip() for h in (rows[0] if rows else [])]
+        try:
+            id_idx = header.index("id")
+            symbol_idx = header.index("symbol")
+            profit_idx = header.index("profit")
+        except ValueError:
+            continue
+        for row in rows[1:]:
+            if len(row) <= max(id_idx, symbol_idx, profit_idx):
+                continue
+
+            pos_id = row[id_idx].strip()
+            symbol = row[symbol_idx].strip().upper()
+
+            # Skip positions whose market is not currently open for trading.
+            # If the symbol isn't found in the MT5 list, assume its market is open.
+            market = symbol_to_market.get(symbol)
+            if market is None:
+                logger.debug(f"Symbol {symbol} not found in MT5 list; assuming market open")
+            elif not _is_market_open(symbol, market, now_utc):
+                continue
+
+            try:
+                profit = float(row[profit_idx])
+            except (TypeError, ValueError):
+                profit = None
+
+            if losing_positions_only and (profit is None or profit >= 0):
+                continue
+
+            positions.append({
+                "symbol": symbol,
+                "position_id": pos_id,
+                "comment": comments.get(pos_id, ""),
+                "unrealized_profit": profit,
+            })
+
+    logger.info(f"Fetched {len(positions)} open positions (losing_only={losing_positions_only})")
+    return {"positions": positions, "count": len(positions)}
 
 
 async def _get_margin_level() -> float | None:
