@@ -318,6 +318,8 @@ async def pick_market(
 @mcp.tool()
 async def get_open_positions(
     losing_positions_only: bool = False,
+    winning_positions_only: bool = False,
+    exclude_crypto: bool = False,
 ) -> dict[str, Any]:
     """Fetch currently open MetaTrader positions whose markets are actually open.
 
@@ -329,8 +331,16 @@ async def get_open_positions(
     Args:
         losing_positions_only: If True, return only positions that currently
             have an unrealized loss (negative floating profit). Defaults to False.
+        winning_positions_only: If True, return only positions that currently
+            have an unrealized profit (positive floating profit). Defaults to False.
+        exclude_crypto: If True, exclude all crypto positions from the results,
+            keeping only positions in non-crypto markets. Defaults to False.
     """
-    return await _get_open_positions(losing_positions_only=losing_positions_only)
+    return await _get_open_positions(
+        losing_positions_only=losing_positions_only,
+        winning_positions_only=winning_positions_only,
+        exclude_crypto=exclude_crypto,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

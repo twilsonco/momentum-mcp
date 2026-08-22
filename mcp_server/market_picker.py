@@ -529,6 +529,8 @@ async def _get_open_position_comments() -> dict[str, str]:
 
 async def get_open_positions(
     losing_positions_only: bool = False,
+    winning_positions_only: bool = False,
+    exclude_crypto: bool = False,
 ) -> dict[str, Any]:
     """Fetch currently open MetaTrader positions whose markets are actually open.
 
@@ -541,12 +543,29 @@ async def get_open_positions(
     Args:
         losing_positions_only: If True, return only positions that currently
             have an unrealized loss (negative floating profit). Defaults to False.
+        winning_positions_only: If True, return only positions that currently
+            have an unrealized profit (positive floating profit). Defaults to False.
+            Note: if both this and ``losing_positions_only`` are set to True, a
+            warning is logged and the direction filter is ignored.
+        exclude_crypto: If True, exclude all crypto positions from the results,
+            keeping only positions in non-crypto markets. Uses ``_fetch_mt5_symbols``
+            to determine each symbol's market. Defaults to False.
 
     Returns:
         Dict with keys ``positions`` (list of position dicts) and ``count``.
         An empty list is returned if MT5 MCP is unavailable or there are no
         open/tradeable positions.
     """
+    # If both direction filters are requested they contradict each other.
+    # Warn and proceed as if neither were set (return all positions).
+    if winning_positions_only and losing_positions_only:
+        logger.warning(
+            "Both winning_positions_only and losing_positions_only are True; "
+            "ignoring the direction filter and returning all positions"
+        )
+        winning_positions_only = False
+        losing_positions_only = False
+
     result = await call_mt5_tool("get_all_positions", {}, timeout=5.0)
     if not result or not getattr(result, "content", None):
         return {"positions": [], "count": 0}
@@ -590,12 +609,20 @@ async def get_open_positions(
             elif not _is_market_open(symbol, market, now_utc):
                 continue
 
+            # Optionally exclude all crypto positions.
+            if exclude_crypto and market == "Cryptos":
+                logger.debug(f"Excluding crypto position {symbol}")
+                continue
+
             try:
                 profit = float(row[profit_idx])
             except (TypeError, ValueError):
                 profit = None
 
             if losing_positions_only and (profit is None or profit >= 0):
+                continue
+
+            if winning_positions_only and (profit is None or profit <= 0):
                 continue
 
             positions.append({
@@ -605,7 +632,10 @@ async def get_open_positions(
                 "unrealized_profit": profit,
             })
 
-    logger.info(f"Fetched {len(positions)} open positions (losing_only={losing_positions_only})")
+    logger.info(
+        f"Fetched {len(positions)} open positions "
+        f"(losing_only={losing_positions_only}, winning_only={winning_positions_only})"
+    )
     return {"positions": positions, "count": len(positions)}
 
 
