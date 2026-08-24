@@ -440,15 +440,23 @@ def _is_market_open(symbol: str, market: str, now_utc: datetime) -> bool:
     
     # Fallback for symbols not in MARKET_HOURS (Forex, Metals)
 
-    # Global Weekend Closure with 2-hour buffers:
-    # Close 2 hours early on Friday (19:00 UTC instead of 21:00 UTC)
-    # Open 2 hours late on Monday (05:00 UTC instead of 03:00 UTC)
-    if (weekday == 4 and hour >= 19) or (weekday == 5) or (weekday == 6) or (weekday == 0 and hour < 5):
+    # Global Weekend Closure.
+    #
+    # Forex/metals close Friday evening (~21:00 UTC) and reopen Sunday night
+    # (~22:00 UTC). The market is therefore closed only during:
+    #   - Friday from 20:00 UTC onward (buffer before the ~21:00 close)
+    #   - all of Saturday
+    #   - Sunday until ~21:59 UTC, reopening at ~22:00
+    #
+    # Monday early hours are OPEN, matching real broker behaviour. The old code
+    # had `weekday == 0 and hour < 5`, which wrongly treated all of early Monday
+    # as closed — so FX/Metals were never picked on a Monday morning even though
+    # they had already reopened Sunday night.
+    if weekday == 4 and hour >= 20:      # Friday after ~8 PM UTC
         return False
-
-    # Daily rollover break for some asset classes (conservative approach)
-    # Block hours 21 and 22 UTC to safely cover daylight savings time shifts
-    if hour == 21 or hour == 22:
+    if weekday in (5,):                  # all of Saturday
+        return False
+    if weekday == 6 and hour < 22:       # Sunday until ~10 PM UTC reopen
         return False
 
     return True
