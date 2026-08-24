@@ -89,15 +89,14 @@ def _evaluate_strategy(
 
     # Cap 2 — Take Profit distance must not exceed a factor of the (capped) SL.
     tp_distance = abs(final_tp - entry_price)
-    max_tp_dist = max_tp_sl_factor * sl_distance
-    if tp_distance > max_tp_dist:
-        logger.info(
-            f"TP distance ({tp_distance:.5f}) exceeds cap "
-            f"{max_tp_sl_factor}x SL ({max_tp_dist:.5f}); clamping TP."
-        )
+    max_tp_atr_factor = 4.0  # Max TP distance cannot exceed 4x ATR
+    max_allowed_tp_dist = min(max_tp_sl_factor * sl_distance, max_tp_atr_factor * atr)
+
+    if tp_distance > max_allowed_tp_dist:
+        logger.info(f"TP distance ({tp_distance:.5f}) exceeds cap; clamping TP.")
         final_tp = (
-            entry_price + max_tp_dist if direction.lower() == 'long'
-            else entry_price - max_tp_dist
+            entry_price + max_allowed_tp_dist if direction.lower() == 'long'
+            else entry_price - max_allowed_tp_dist
         )
 
     # Recompute the discrete RR from the (possibly capped) distances.
@@ -385,13 +384,12 @@ def _determine_sl_tp_from_swings(
     
     logger.info(f"Adjusted Proposed SL: {proposed_sl}, SL Distance: {sl_distance}, Current ATR: {current_atr}")
 
-    # 3. Find Take Profit (TP) Structural Barrier
-    # Deterministic proxy: Highest high (longs) or lowest low (shorts) in the last 48 hours
+    # 3. Find Take Profit Barrier using 95th/5th percentile to reject outlier wicks
     if direction.lower() == 'long':
-        barrier_price = window_last_48['High'].max()
+        barrier_price = float(np.percentile(window_last_48['High'], 95))
         barrier_distance = barrier_price - entry_price
     else:
-        barrier_price = window_last_48['Low'].min()
+        barrier_price = float(np.percentile(window_last_48['Low'], 5))
         barrier_distance = entry_price - barrier_price
         
     logger.info(f"Barrier Price: {barrier_price}, Barrier Distance: {barrier_distance}")
@@ -489,34 +487,30 @@ def _get_vw_kde_sr_levels(
     if len(prices) < 2 or weights.sum() <= 0:
         return np.array([])
 
-    # Absolute bandwidth scaled to the price range so results are consistent
-    # regardless of instrument price magnitude.
-    bw_abs = float(np.nanstd(prices)) * bw_frac
+    # Winsorize volume weights so 1-2 news candles do not dominate the PDF
+    median_vol = float(np.nanmedian(weights))
+    capped_weights = np.clip(weights, 0, max(median_vol * 3.0, 1.0))
 
-    # Guard against a flat (zero variance) or NaN price series. A zero/NaN
-    # bandwidth makes scipy's gaussian_kde divide by it internally, emitting a
-    # "RuntimeWarning: invalid value encountered in scalar divide". There is no
-    # meaningful structure to extract from such data, so bail out cleanly.
+    bw_abs = float(np.nanstd(prices)) * bw_frac
     if not np.isfinite(bw_abs) or bw_abs <= 0:
-        logger.warning(
-            f"VW-KDE bandwidth invalid ({bw_abs}); flat/NaN price series; "
-            "invalidating trade."
-        )
         return np.array([])
 
-    kde = gaussian_kde(prices, weights=weights, bw_method=bw_abs)
-    price_grid = np.linspace(
-        float(np.nanmin(df['Low'])),
-        float(np.nanmax(df['High'])),
-        resolution,
-    )
+    kde = gaussian_kde(prices, weights=capped_weights, bw_method=bw_abs)
+    
+    # Restrict the grid to the 2nd and 98th percentiles to avoid stretching across isolated wicks
+    p_min = float(np.nanpercentile(df['Low'], 2))
+    p_max = float(np.nanpercentile(df['High'], 98))
+    
+    if p_max <= p_min:
+        p_min, p_max = float(np.nanmin(df['Low'])), float(np.nanmax(df['High']))
+
+    price_grid = np.linspace(p_min, p_max, resolution)
     pdf = kde(price_grid)
 
     prominence_threshold = pdf.max() * prominence_frac
     peaks, _ = find_peaks(pdf, prominence=prominence_threshold)
     raw_levels = price_grid[peaks]
 
-    # Merge micro-peaks within one bandwidth into single structural levels.
     return _cluster_levels(raw_levels, min_gap=bw_abs)
 
 

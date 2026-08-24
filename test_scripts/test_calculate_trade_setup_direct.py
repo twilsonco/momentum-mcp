@@ -43,7 +43,7 @@ from mcp_server.calculate_trade_setup import calculate_trade_setups
 from mcp_server.charts import generate_chart as _generate_chart
 from mcp_server.data import get_historical_data
 
-TICKER = "EURJPY"
+TICKER = "ADAUSD"
 # 6 months of H1 data gives the VW-KDE method enough history to find
 # structural volume nodes on both sides of price. Shorter windows (e.g. 1mo)
 # often leave all density below a rising market, so no resistance node exists.
