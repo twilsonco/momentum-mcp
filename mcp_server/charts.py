@@ -56,7 +56,15 @@ class ChartResult(TypedDict):
 logger = logging.getLogger(__name__)
 
 # Default output directory for saved charts
-CHARTS_DIR = Path("./charts")
+# Use absolute path to avoid issues with different working directories
+import os
+_charts_dir_env = os.getenv("CHARTS_DIR")
+if _charts_dir_env:
+    CHARTS_DIR = Path(_charts_dir_env)
+else:
+    # Default to project root / charts
+    PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+    CHARTS_DIR = PROJECT_ROOT / "charts"
 
 # Clean dark style for chart rendering
 _STYLE = mpf.make_mpf_style(

@@ -89,7 +89,7 @@ def _evaluate_strategy(
 
     # Cap 2 — Take Profit distance must not exceed a factor of the (capped) SL.
     tp_distance = abs(final_tp - entry_price)
-    max_tp_atr_factor = 4.0  # Max TP distance cannot exceed 4x ATR
+    max_tp_atr_factor = 3.0  # Max TP distance cannot exceed 4x ATR
     max_allowed_tp_dist = min(max_tp_sl_factor * sl_distance, max_tp_atr_factor * atr)
 
     if tp_distance > max_allowed_tp_dist:

@@ -7,6 +7,8 @@ otherwise returns the tool output as JSON.
 
 import asyncio
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 import sys
 import subprocess
@@ -16,6 +18,44 @@ from pathlib import Path
 PROJECT_ROOT = Path("/Users/haiiro/NoSync/momentum-mcp")
 SERVER_PYTHON = PROJECT_ROOT / ".venv/bin/python"
 SERVER_MODULE = "mcp_server.server"
+
+MAX_POSITIONS = 15
+
+
+def _setup_logging() -> logging.Logger:
+    """Configure a rotating file logger for this script in logs/.
+
+    Writes to logs/market_precheck.log (20MB cap, 3 backups) so the market
+    picker output and lifecycle events are captured separately from the MCP
+    server's own momentum.log.
+    """
+    log_dir = PROJECT_ROOT / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("market_precheck")
+    if not getattr(logger, "_file_handler_attached", False):
+        handler = RotatingFileHandler(
+            str(log_dir / "market_precheck.log"),
+            maxBytes=20 * 1024 * 1024,  # 20 MB
+            backupCount=3,
+            encoding="utf-8",
+        )
+        handler.setLevel(logging.INFO)
+        handler.setFormatter(
+            logging.Formatter(
+                fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+        logger._file_handler_attached = True
+
+    return logger
+
+
+logger = _setup_logging()
 SERVER_ENV = {
     "MCP_TRANSPORT": "stdio",
     "PYTHONPATH": str(PROJECT_ROOT),
@@ -43,6 +83,7 @@ class MCPClient:
             stderr=subprocess.PIPE,
             env={**dict(os.environ), **SERVER_ENV},
         )
+        logger.info("MCP server process started (pid=%s)", self.process.pid)
 
         # Initialize
         await self._send_request({
@@ -77,6 +118,7 @@ class MCPClient:
     async def stop(self) -> None:
         """Stop the MCP server process."""
         if self.process:
+            logger.info("Stopping MCP server (pid=%s)", self.process.pid)
             self.process.terminate()
             try:
                 await asyncio.wait_for(self.process.wait(), timeout=5.0)
@@ -105,40 +147,52 @@ class MCPClient:
 
 
 def _contains_abort(obj) -> bool:
-    """Check if the result dict only has 'error' as its key."""
+    """Check if the result dict is a pure error response (no market data)."""
     return isinstance(obj, dict) and len(obj) == 1 and 'error' in obj
 
 
 async def main() -> dict:
+    logger.info("market_precheck starting (max_positions=%s)", MAX_POSITIONS)
     client = MCPClient()
     try:
         await client.start()
 
         response = await asyncio.wait_for(
             client.call_tool("pick_market", {"max_positions": MAX_POSITIONS}),
-            timeout=30.0,
+            timeout=120.0,
         )
 
         # Extract the text content from the MCP response
         content_list = response.get("result", {}).get("content", [])
-        if content_list:
-            text = content_list[0].get("text", "{}")
-            result = json.loads(text) if isinstance(text, str) else text
-        else:
-            result = response.get("result", {})
-        
-        print(result)
+        try:
+            if content_list:
+                text = content_list[0].get("text", "{}")
+                result = json.loads(text) if isinstance(text, str) else text
+            else:
+                result = response.get("result", {})
+        except json.JSONDecodeError:
+            result = {"error": f"Invalid JSON in response: {text}"}
+
+        # Log the full market picker output for later inspection.
+        logger.info("pick_market raw result:\n%s",
+                    json.dumps(result, indent=2, default=str))
 
         if _contains_abort(result):
+            logger.warning("Market picker returned error: %s", result)
             return {"wakeAgent": False}
 
+        logger.info("pick_market completed successfully")
+        return result
+
     except asyncio.TimeoutError:
-        return {"wakeAgent": False, "error": "pick_market timed out (30s)"}
+        logger.error("pick_market timed out (120s)")
+        return {"wakeAgent": False, "error": "pick_market timed out (120s)"}
     finally:
         await client.stop()
 
 
 if __name__ == "__main__":
     result = asyncio.run(main())
+    logger.info("market_precheck finished, wakeAgent=%s", result.get("wakeAgent"))
     print(json.dumps(result))
     sys.exit(0)

@@ -54,7 +54,8 @@ ALLOWED_SYMBOL_MARKETS = [
 ALLOWED_CRYPTOS = [r".*USD"]
 
 DISALLOWED_SYMBOLS = [
-    "NEOUSD"
+    "NEOUSD",
+    "EOSUSD"
 ]
 
 ALL_INTERVALS = ["1m", "2m", "5m", "15m", "30m", "60m", "90m",
