@@ -11,6 +11,7 @@ import asyncio
 import base64
 import io
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, NotRequired, TypedDict
 
@@ -20,7 +21,8 @@ matplotlib.use("Agg")  # Headless rendering — must be set before importing pyp
 import mplfinance as mpf  # noqa: E402
 import pandas as pd  # noqa: E402
 
-from mcp_server.data import get_historical_data  # noqa: E402
+from mcp_server.data import fetch_mt5_records, get_historical_data  # noqa: E402
+from mcp_server.cache import bypass_cache, seconds_since_last_close  # noqa: E402
 from mcp.server.fastmcp.utilities.types import Image  # noqa: E402
 
 
@@ -50,6 +52,7 @@ class ChartResult(TypedDict):
     bars: int
     emas: list[int]
     path: str
+    last_bar: str
     trade: NotRequired[TradeLevels]
 
 
@@ -105,6 +108,119 @@ _EMA_STACK = [
 #     (55, "#f97316", "EMA 55"),  # orange
 #     (89, "#ef4444", "EMA 89"),  # red
 # ]
+
+# ── Chart freshness guard ─────────────────────────────────────────────────────
+# Charts must never show price action that omits the newest bars available
+# from MT5. Data can arrive stale through several paths — a smart_cache hit
+# (previously up to 24h old on weekends/holidays), a delayed fallback source
+# (TwelveData free tier / yfinance), or `input_records` handed over by
+# market_picker from a fetch made earlier in the run. Before rendering we
+# verify the age of the newest bar against the thresholds below; if the data
+# fails, we re-fetch straight from MT5 (uncached) and refuse to chart if it
+# is *still* stale.
+#
+# These are deliberately *tighter* than data.py's _MAX_BAR_AGE_SECONDS: that
+# module's job is "return usable data from any source", this module's job is
+# "guarantee the chart's last bar is MT5's latest". Closure grace (see
+# _closure_grace_seconds) is added on top so weekends/holidays don't trip it.
+_CHART_MAX_BAR_AGE_SECONDS: dict[str, float] = {
+    # intraday: ~6h of slack covers brief MT5 terminal hiccups; 1h+ bars get
+    # a full day so a single missing bar doesn't block rendering.
+    "1m": 6 * 3600, "2m": 6 * 3600, "5m": 6 * 3600, "15m": 6 * 3600,
+    "30m": 6 * 3600, "60m": 24 * 3600, "1h": 24 * 3600, "90m": 24 * 3600,
+    # daily+: tolerate a weekend or long weekend, nothing more.
+    "1d": 4 * 86400, "5d": 4 * 86400,
+    "1wk": 10 * 604800, "1mo": 40 * 86400, "3mo": 100 * 86400,
+}
+
+
+def _newest_bar_age_seconds(records: list[dict[str, Any]]) -> float | None:
+    """Age of the newest bar in *records* relative to now (UTC).
+
+    Returns ``None`` if the timestamp cannot be parsed (callers treat that
+    as "unknown" and skip the guard rather than blocking on a format quirk).
+    Naive timestamps are assumed UTC — every source in the chain stamps
+    bars in UTC or broker time close enough to it.
+    """
+    from dateutil import parser as _parser
+
+    try:
+        last_dt = _parser.parse(records[-1]["date"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if last_dt.tzinfo is None:
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last_dt).total_seconds()
+
+
+def _freshness_threshold(interval: str) -> float:
+    """Effective staleness threshold for *interval*: base allowance plus
+    closure grace, so legitimately-old bars (weekend/holiday) pass."""
+    base = _CHART_MAX_BAR_AGE_SECONDS.get(interval, 4 * 86400)
+    return base + seconds_since_last_close()
+
+
+async def _ensure_fresh_records(
+    ticker: str,
+    period: str,
+    interval: str,
+    records: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Guarantee *records* reach back to MT5's newest available bar.
+
+    If the newest bar is older than the per-interval threshold (adjusted for
+    market closures), re-fetch directly from MT5 with the cache bypassed.
+    The re-fetched data is accepted when it passes the same check; if MT5
+    itself still returns stale data (terminal offline / out of sync) or is
+    unreachable, raise ``ValueError`` so callers skip the symbol instead of
+    rendering a chart that silently omits recent price action.
+
+    Returns the (possibly replaced) record list.
+    """
+    age = _newest_bar_age_seconds(records)
+    if age is None:
+        logger.warning(
+            "Chart freshness check skipped for %s: unparseable newest-bar "
+            "timestamp %r.", ticker, records[-1].get("date") if records else None,
+        )
+        return records
+
+    threshold = _freshness_threshold(interval)
+    if age <= threshold:
+        return records
+
+    newest = records[-1].get("date")
+    logger.warning(
+        "Chart data for %s (%s/%s) is stale: newest bar %s is %.1fh old "
+        "(threshold %.1fh). Re-fetching from MT5 directly...",
+        ticker, period, interval, newest, age / 3600.0, threshold / 3600.0,
+    )
+
+    try:
+        async with bypass_cache():
+            fresh = await fetch_mt5_records(ticker, period, interval)
+    except Exception as exc:
+        raise ValueError(
+            f"Refusing to chart '{ticker}': newest bar available is {newest} "
+            f"({age / 3600.0:.1f}h old, limit {threshold / 3600.0:.1f}h) and a "
+            f"direct MT5 re-fetch failed: {exc}"
+        ) from exc
+
+    fresh_age = _newest_bar_age_seconds(fresh)
+    if fresh_age is None or fresh_age <= _freshness_threshold(interval):
+        logger.info(
+            "Fresh MT5 re-fetch for %s: newest bar %s (%.1fh old, was %.1fh).",
+            ticker, fresh[-1].get("date") if fresh else "?",
+            (fresh_age or 0) / 3600.0, age / 3600.0,
+        )
+        return fresh
+
+    raise ValueError(
+        f"Refusing to chart '{ticker}': MT5 itself only has bars up to "
+        f"{fresh[-1].get('date')} ({fresh_age / 3600.0:.1f}h old, limit "
+        f"{_freshness_threshold(interval) / 3600.0:.1f}h) — the MT5 terminal "
+        f"appears out of sync."
+    )
 
 
 async def generate_chart(
@@ -198,6 +314,13 @@ async def generate_chart(
         raise ValueError(
             f"Not enough data to chart '{ticker}': got {len(records)} bars."
         )
+
+    # Freshness guard: never render a chart whose newest bar is older than
+    # MT5's latest. Covers both entry paths — `input_records` handed over
+    # by market_picker (fetched earlier in the run, possibly from cache)
+    # and our own get_historical_data call (cache hit / delayed fallback
+    # source). Re-fetches from MT5 when stale; raises if MT5 is stale too.
+    records = await _ensure_fresh_records(ticker, period, interval, records)
 
     # Validate trade level inputs
     if (stop_loss_price is not None or take_profit_price is not None) and entry_price is None:
@@ -400,6 +523,28 @@ async def generate_chart(
                 labelcolor="#cccccc",
             )
 
+        # Timestamp of the newest bar rendered, so the chart itself declares
+        # how current it is (freshness is verifiable from the PNG alone).
+        try:
+            _last = df.index.max()
+            _last_str = _last.strftime("%Y-%m-%d %H:%M")
+            if _last.tzinfo is not None:
+                _last_str += " " + _last.strftime("%Z")
+        except Exception:
+            _last_str = str(df.index.max())
+        axes[0].text(
+            0.995, 0.02, f"Last bar: {_last_str}",
+            transform=axes[0].transAxes,
+            color="#9ca3af", fontsize=8, fontweight="bold",
+            ha="right", va="bottom",
+            bbox=dict(
+                boxstyle="round,pad=0.3",
+                facecolor="#1a1a1a",
+                edgecolor="#333333",
+                alpha=0.85,
+            ),
+        )
+
         # Save to buffer
         buf = io.BytesIO()
         fig.savefig(buf, dpi=150, bbox_inches="tight", facecolor=fig.get_facecolor())
@@ -429,6 +574,7 @@ async def generate_chart(
         "bars": len(df),
         "emas": ema_periods_used,
         "path": path,
+        "last_bar": str(df.index.max()),
     }
 
     if trade_levels:

@@ -28,6 +28,8 @@ import hashlib
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta
 from functools import wraps
 from typing import Any
@@ -84,13 +86,50 @@ def get_market_status() -> str:
     return "closed"
 
 
-def get_ttl(open_ttl: int = 300, closed_ttl: int = 3600) -> int:
-    """Return appropriate TTL in seconds based on market status."""
+def seconds_since_last_close(now: datetime | None = None) -> float:
+    """Seconds elapsed since the most recent US market close (16:00 ET on a
+    weekday that is not a market holiday). Returns 0.0 while the market is open.
+
+    Freshness checks use this as a *closure grace*: a bar can legitimately be
+    old simply because the market was closed, so staleness thresholds are
+    inflated by this amount. Weekends and holiday stretches are handled by
+    scanning back to the last real trading day.
+    """
+    now_et = (now or datetime.now(ET)).astimezone(ET)
+    if is_market_open():
+        return 0.0
+
+    day = now_et
+    for _ in range(15):  # bounded scan; covers even long holiday stretches
+        is_trading_day = (
+            day.weekday() < 5
+            and day.strftime("%Y-%m-%d") not in _MARKET_HOLIDAYS
+        )
+        if is_trading_day:
+            close = day.replace(hour=16, minute=0, second=0, microsecond=0)
+            if close <= now_et:
+                return (now_et - close).total_seconds()
+        day = day - timedelta(days=1)
+
+    # Shouldn't happen (weekdays recur weekly); fail open with a large grace.
+    return (now_et - day).total_seconds()
+
+
+def get_ttl(open_ttl: int = 300, closed_ttl: int = 3600, weekend_ttl: int = 3600) -> int:
+    """Return appropriate TTL in seconds based on market status.
+
+    ``weekend_ttl`` applies on weekends and market holidays. It used to be a
+    flat 24 hours ("data is frozen"), but that assumption only holds for US
+    equities: this server also charts forex/metals/crypto that trade ~24h,
+    and MT5 can begin streaming new bars while the US market is still
+    closed. A 24h TTL let one stale fetch poison every chart for a whole
+    day, so the default is now 1 hour.
+    """
     status = get_market_status()
     if status == "open":
         return open_ttl
     elif status in ("weekend", "holiday"):
-        return 86400  # 24 hours — data is frozen
+        return weekend_ttl
     else:
         return closed_ttl
 
@@ -105,6 +144,28 @@ _cache_misses = 0
 # When multiple callers request the same cache key simultaneously,
 # only ONE upstream call is made.  Others await the same Future.
 _inflight: dict[str, asyncio.Future] = {}  # key -> Future (while a request is in-flight)
+
+# ── Cache Bypass ──────────────────────────────────────────────────────────────
+# Callers that must see *upstream* data (e.g. charts.py re-fetching after a
+# staleness check) can force smart_cache to skip read/write/coalescing for
+# everything awaited inside the bypass_cache() block.
+_BYPASS_CACHE: ContextVar[bool] = ContextVar("cache_bypass", default=False)
+
+
+@asynccontextmanager
+async def bypass_cache():
+    """Context manager: smart_cache-decorated calls inside skip the cache.
+
+    The underlying function is executed directly — no cache read, no cache
+    write, and no singleflight coalescing (so concurrent bypass callers each
+    get their own upstream call). Use sparingly: it defeats the thundering-
+    herd protection this module exists to provide.
+    """
+    token = _BYPASS_CACHE.set(True)
+    try:
+        yield
+    finally:
+        _BYPASS_CACHE.reset(token)
 
 
 def _make_key(func_name: str, args: tuple, kwargs: dict) -> str:
@@ -126,16 +187,23 @@ def smart_cache(open_ttl: int = 300, closed_ttl: int = 3600):
     - Market-hours-aware TTL (open/closed/weekend)
     - Request coalescing: concurrent identical requests share one upstream call
     - Automatic expired-entry eviction
+    - Honors the ``bypass_cache()`` context manager (calls execute directly)
 
     Args:
         open_ttl: TTL in seconds during market hours (default: 5 min)
         closed_ttl: TTL in seconds when market is closed (default: 60 min)
-                    Weekends/holidays automatically use 24h.
+                    Weekends/holidays automatically use ``weekend_ttl``
+                    (default 1 hour — see :func:`get_ttl`).
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             global _cache_hits, _cache_misses
+
+            # ── 0. Bypass: caller explicitly requires an upstream call ──
+            if _BYPASS_CACHE.get():
+                logger.debug("Cache BYPASS: %s", func.__name__)
+                return await func(*args, **kwargs)
 
             key = _make_key(func.__name__, args, kwargs)
             now = time.time()

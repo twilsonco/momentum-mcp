@@ -170,6 +170,12 @@ def _is_data_fresh(records: list[dict[str, Any]], interval: str) -> bool:
         # Can't parse the timestamp — assume fresh rather than block on a format quirk.
         return True
 
+    if last_dt.tzinfo is None:
+        # TwelveData (and occasionally yfinance) return naive timestamps.
+        # Both sources stamp bars in UTC-ish terms, so assume UTC; worst case
+        # we misjudge age by a few hours, far below the staleness thresholds.
+        last_dt = last_dt.replace(tzinfo=timezone.utc)
+
     max_age = _MAX_BAR_AGE_SECONDS.get(interval, 5 * 86400)
     age = datetime.now(timezone.utc) - last_dt
     if age.total_seconds() <= max_age:
@@ -267,6 +273,25 @@ async def get_historical_data(
             else:
                 records = await fetcher(ticker, period, interval)
             if records:
+                # ── Freshness gate (applies to EVERY source) ──────────────
+                # A dataset can *span* the requested window yet still be
+                # missing the newest bars (MT5 terminal out of sync, delayed
+                # TwelveData/yfinance feeds, daily bar not yet posted). The
+                # coverage check below would happily accept such data, so
+                # also verify the age of the newest bar. Unlike coverage,
+                # staleness is never "acceptable": even with
+                # fallback_for_incomplete_data=False we move on to the next
+                # source rather than return bars that are days old.
+                if not _is_data_fresh(records, interval):
+                    msg = (
+                        f"Stale data from {source_name}: newest bar "
+                        f"{records[-1]['date']} for {ticker} "
+                        f"(interval={interval}). Trying next source..."
+                    )
+                    logger.warning(msg)
+                    errors.append(msg)
+                    continue
+
                 # Check if data covers the requested period; if not, try next source
                 if not _date_range_covers_period(records, period):
                     msg = (
@@ -478,6 +503,51 @@ async def _fetch_from_mt5(
         logger.warning("%s — retrying...", last_error)
 
     raise ValueError(last_error or "MetaTrader MCP returned stale data")
+
+
+async def fetch_mt5_records(
+    ticker: str, period: str, interval: str
+) -> list[dict[str, Any]]:
+    """Fetch OHLCV *directly* from the MetaTrader MCP server (uncached).
+
+    Public entry point to the MT5 source that bypasses both the
+    ``smart_cache`` wrapper on :func:`get_historical_data` and the
+    TwelveData/yfinance fallback chain. ``_fetch_from_mt5`` already
+    retries transiently-stale responses a few times and enforces
+    :func:`_is_data_fresh` before returning, so a successful result is
+    MT5's genuinely newest data.
+
+    Intended for freshness-critical callers (e.g. ``charts.py``) that must
+    verify the newest bar against MT5 itself rather than trust a cached or
+    fallback-sourced dataset.
+
+    Args:
+        ticker: Symbol name as MT5 knows it (e.g. ``"XAUUSD"``, ``"EURUSD"``).
+        period: Lookback period (see :data:`VALID_PERIODS`).
+        interval: Bar interval (see :data:`VALID_INTERVALS`).
+
+    Returns:
+        Records in the unified format, newest last, ``source == "mt5_mcp"``.
+
+    Raises:
+        ValueError: If MT5 is unconfigured, the arguments are invalid, the
+            server fails, or every attempt returns stale data.
+    """
+    ticker = ticker.strip().upper()
+    if period == "1M":
+        period = "1mo"
+    if period not in VALID_PERIODS:
+        raise ValueError(
+            f"Invalid period '{period}'. Must be one of: {sorted(VALID_PERIODS)}"
+        )
+    if interval not in VALID_INTERVALS:
+        raise ValueError(
+            f"Invalid interval '{interval}'. Must be one of: {sorted(VALID_INTERVALS)}"
+        )
+    if not MT5_MCP_URL:
+        raise ValueError("MT5_MCP_URL is not configured — cannot fetch from MT5 directly.")
+
+    return await _fetch_from_mt5(ticker, period, interval)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

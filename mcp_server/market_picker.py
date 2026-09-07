@@ -1030,13 +1030,20 @@ async def pick_market(
                     "actual_risk": position_size.data["actual_risk"],
                     "actual_risk_pct": position_size.data["actual_risk_pct"]
                 }
-                tmp_chart_data = await _generate_chart(
-                    symbol, interval=interval, period=timeframe[1], input_records=records,
-                    entry_price=trade_setups[setup_key]["entry"],
-                    stop_loss_price=trade_setups[setup_key]["stop_loss"],
-                    take_profit_price=trade_setups[setup_key]["take_profit"]
-                )
-                trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
+                try:
+                    tmp_chart_data = await _generate_chart(
+                        symbol, interval=interval, period=timeframe[1], input_records=records,
+                        entry_price=trade_setups[setup_key]["entry"],
+                        stop_loss_price=trade_setups[setup_key]["stop_loss"],
+                        take_profit_price=trade_setups[setup_key]["take_profit"]
+                    )
+                    trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
+                except Exception as e:
+                    # generate_chart raises when even a direct MT5 re-fetch
+                    # can't produce fresh bars — keep the valid setup, drop
+                    # only the trade-level chart.
+                    logger.error(f"Failed to generate trade chart for {symbol}: {e}")
+                    trade_setups[setup_key][f"{direction}_chart_path"] = None
         print(trade_setups)
         
         picked_symbol = symbol

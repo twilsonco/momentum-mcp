@@ -153,6 +153,22 @@ def _contains_abort(obj) -> bool:
 
 async def main() -> dict:
     logger.info("market_precheck starting (max_positions=%s)", MAX_POSITIONS)
+    
+    # Clean up charts directory (use same logic as charts.py, but standalone)
+    charts_dir_env = os.getenv("CHARTS_DIR")
+    if charts_dir_env:
+        charts_dir = Path(charts_dir_env)
+    else:
+        charts_dir = PROJECT_ROOT / "charts"
+    
+    if charts_dir.exists():
+        import shutil
+        try:
+            shutil.rmtree(charts_dir)
+            logger.info("Cleaned up charts directory: %s", charts_dir)
+        except Exception as e:
+            logger.warning("Failed to clean up charts directory: %s", e)
+    
     client = MCPClient()
     try:
         await client.start()
