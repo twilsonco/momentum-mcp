@@ -297,6 +297,11 @@ async def pick_market(
         max_positions: int = 10,
         minimum_margin_percent: float = 500.0,
         intervals: list[str] = INTERVALS,
+        generate_chart: bool = True,
+        generate_position_data: bool = True,
+        include_market_adjustment: bool = True,
+        include_trading_session: bool = True,
+        include_datetime: bool = True,
     ) -> dict[str, Any]:
     """Pick a random market to trade based on open hours and open positions.
 
@@ -312,6 +317,11 @@ async def pick_market(
         max_positions=max_positions,
         minimum_margin_percent=minimum_margin_percent,
         intervals=intervals,
+        generate_chart=generate_chart,
+        generate_position_data=generate_position_data,
+        include_market_adjustment=include_market_adjustment,
+        include_trading_session=include_trading_session,
+        include_datetime=include_datetime,
     )
 
 

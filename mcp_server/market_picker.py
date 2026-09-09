@@ -871,6 +871,10 @@ async def pick_market(
     minimum_margin_percent: float = 500.0,
     intervals: list[str] = INTERVALS,
     generate_chart: bool = True,
+    generate_position_data: bool = True,
+    include_market_adjustment: bool = True,
+    include_trading_session: bool = True,
+    include_datetime: bool = True,
 ) -> dict[str, Any]:
     """Pick a random market symbol that doesn't have an open position.
 
@@ -897,7 +901,7 @@ async def pick_market(
         - symbol: The picked market symbol
         - interval: Random interval (M15, M30, H1, H4, D1)
         - historical_data_timeframe: Recommended timeframe for historical data
-        - trading_sessions: Current active trading session(s) with phase description
+        - trading_sessions: [optional] Current active trading session(s) with phase description
                            (e.g. "end of Tokyo session and beginning of London session")
         - current_time_utc: Current UTC time (ISO-8601)
         - current_time_local: Current local time (ISO-8601)
@@ -1003,10 +1007,14 @@ async def pick_market(
             continue
         
         # Market is open and symbol is valid, proceed with trade setup
-        trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info, input_records=records)
-        if "status" in trade_setups and "Abort" in trade_setups["status"]:
-            logger.info(f"Trade setups for {symbol} indicate abort: {trade_setups['status']}")
-            continue
+        if generate_position_data:
+            trade_setups = await calculate_trade_setups(symbol, timeframe[1], interval, symbol_info=symbol_info, input_records=records)
+            if "status" in trade_setups and "Abort" in trade_setups["status"]:
+                logger.info(f"Trade setups for {symbol} indicate abort: {trade_setups['status']}")
+                continue
+        else:
+            trade_setups = None
+
         if generate_chart:
             try:
                 chart_data = await _generate_chart(symbol, interval=interval, period=timeframe[1], input_records=records)
@@ -1016,35 +1024,36 @@ async def pick_market(
         else:
             chart_data = None
         
-        for setup_key, direction in (("long_buy_setup", "long"), ("short_sell_setup", "short")):
-            if "Abort" not in trade_setups[setup_key].get("status", ""):
-                position_size = await calculate_mt5_position_size(
-                    symbol,
-                    direction,
-                    trade_setups[setup_key]["entry"],
-                    trade_setups[setup_key]["stop_loss"]
-                )
-                print(position_size)
-                trade_setups[setup_key]["position_risk"] = {
-                    "position_lots": position_size.data["position_lots"],
-                    "actual_risk": position_size.data["actual_risk"],
-                    "actual_risk_pct": position_size.data["actual_risk_pct"]
-                }
-                try:
-                    tmp_chart_data = await _generate_chart(
-                        symbol, interval=interval, period=timeframe[1], input_records=records,
-                        entry_price=trade_setups[setup_key]["entry"],
-                        stop_loss_price=trade_setups[setup_key]["stop_loss"],
-                        take_profit_price=trade_setups[setup_key]["take_profit"]
+        if generate_position_data:
+            for setup_key, direction in (("long_buy_setup", "long"), ("short_sell_setup", "short")):
+                if "Abort" not in trade_setups[setup_key].get("status", ""):
+                    position_size = await calculate_mt5_position_size(
+                        symbol,
+                        direction,
+                        trade_setups[setup_key]["entry"],
+                        trade_setups[setup_key]["stop_loss"]
                     )
-                    trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
-                except Exception as e:
-                    # generate_chart raises when even a direct MT5 re-fetch
-                    # can't produce fresh bars — keep the valid setup, drop
-                    # only the trade-level chart.
-                    logger.error(f"Failed to generate trade chart for {symbol}: {e}")
-                    trade_setups[setup_key][f"{direction}_chart_path"] = None
-        print(trade_setups)
+                    print(position_size)
+                    trade_setups[setup_key]["position_risk"] = {
+                        "position_lots": position_size.data["position_lots"],
+                        "actual_risk": position_size.data["actual_risk"],
+                        "actual_risk_pct": position_size.data["actual_risk_pct"]
+                    }
+                    try:
+                        tmp_chart_data = await _generate_chart(
+                            symbol, interval=interval, period=timeframe[1], input_records=records,
+                            entry_price=trade_setups[setup_key]["entry"],
+                            stop_loss_price=trade_setups[setup_key]["stop_loss"],
+                            take_profit_price=trade_setups[setup_key]["take_profit"]
+                        )
+                        trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
+                    except Exception as e:
+                        # generate_chart raises when even a direct MT5 re-fetch
+                        # can't produce fresh bars — keep the valid setup, drop
+                        # only the trade-level chart.
+                        logger.error(f"Failed to generate trade chart for {symbol}: {e}")
+                        trade_setups[setup_key][f"{direction}_chart_path"] = None
+            print(trade_setups)
         
         picked_symbol = symbol
         picked_market = market
@@ -1063,10 +1072,6 @@ async def pick_market(
         "desc": symbol_info.get("description") if symbol_info else None,
         "interval": interval,
         "timeframe": timeframe,
-        "trading_sessions": _get_trading_sessions(now_utc),
-        "time_utc": now_utc,
-        "time_local": now_local,
-        "market_adjustment": MARKET_ADJUSTMENTS.get(picked_market, None),
         "symbol_data": {
             "spread": symbol_info.get("spread") if symbol_info else None,
             "ask": symbol_info.get("ask") if symbol_info else None,
@@ -1078,11 +1083,22 @@ async def pick_market(
             "volume_min": symbol_info.get("volume_min") if symbol_info else None,
             "volume_step": symbol_info.get("volume_step") if symbol_info else None
         },
-        "chart_data": chart_data,
+        "chart_path": chart_data.get("path") if chart_data else None,
         # "num_open_positions": num_positions,
         # "allowed_additional_positions": allowed_additional_positions,
     }
-    result |= trade_setups
+    if generate_position_data:
+        result |= trade_setups
+    
+    if include_market_adjustment:
+        result["market_adjustment"] = MARKET_ADJUSTMENTS.get(picked_market, None)
+    
+    if include_trading_session:
+        result["trading_sessions"] = _get_trading_sessions(now_utc)
+    
+    if include_datetime:
+        result["time_utc"] = now_utc
+        result["time_local"] = now_local
     
     logger.info(f"Picked symbol: {picked_symbol}, interval: {interval}")
     return result

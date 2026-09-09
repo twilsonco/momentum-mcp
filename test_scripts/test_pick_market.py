@@ -174,7 +174,13 @@ async def main() -> dict:
         await client.start()
 
         response = await asyncio.wait_for(
-            client.call_tool("pick_market", {"max_positions": MAX_POSITIONS}),
+            client.call_tool("pick_market", {
+                "max_positions": MAX_POSITIONS, 
+                "generate_position_data": False,
+                "include_market_adjustment": False,
+                "include_trading_session": False,
+                "include_datetime": False,
+            }),
             timeout=120.0,
         )
 
