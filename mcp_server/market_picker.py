@@ -498,44 +498,6 @@ async def _get_open_position_symbols() -> set[str]:
     return set()
 
 
-async def _get_open_position_comments() -> dict[str, str]:
-    """Map position_id -> comment by scanning MT5 order history.
-
-    ``get_all_positions`` does not include the order comment, so we pull it
-    from the historical orders feed (which carries a ``position_id`` and a
-    ``comment`` column) to enrich each open position with its original entry
-    comment. Returns an empty dict if MT5 MCP is unavailable.
-
-    Returns:
-        Dict mapping position id (str) -> order comment.
-    """
-    result = await call_mt5_tool("get_orders", {}, timeout=10.0)
-    comments: dict[str, str] = {}
-    if not result or not getattr(result, "content", None):
-        return comments
-
-    for content in result.content:
-        text = getattr(content, "text", "")
-        rows = list(csv.reader(io.StringIO(text or "")))
-        # Header: time_setup,ticket,...,position_id,...,symbol,comment,external_id
-        header = [h.strip() for h in (rows[0] if rows else [])]
-        try:
-            pos_idx = header.index("position_id")
-            comment_idx = header.index("comment")
-        except ValueError:
-            continue
-        for row in rows[1:]:
-            if len(row) <= max(pos_idx, comment_idx):
-                continue
-            pos_id = row[pos_idx].strip()
-            comment = row[comment_idx].strip()
-            if pos_id and not comments.get(pos_id):
-                comments[pos_id] = comment
-
-    logger.debug(f"Resolved {len(comments)} position comments from order history")
-    return comments
-
-
 async def get_open_positions(
     losing_positions_only: bool = False,
     winning_positions_only: bool = False,
@@ -579,8 +541,6 @@ async def get_open_positions(
     if not result or not getattr(result, "content", None):
         return {"positions": [], "count": 0}
 
-    comments = await _get_open_position_comments()
-
     # Build symbol -> market map so we can determine which markets are open.
     symbols_by_market = await _fetch_mt5_symbols()
     symbol_to_market: dict[str, str] = {}
@@ -601,6 +561,9 @@ async def get_open_positions(
             id_idx = header.index("id")
             symbol_idx = header.index("symbol")
             profit_idx = header.index("profit")
+            comment_idx = header.index("comment")
+            open_id_idx = header.index("open")
+            type_idx = header.index("type")
         except ValueError:
             continue
         for row in rows[1:]:
@@ -637,8 +600,10 @@ async def get_open_positions(
             positions.append({
                 "symbol": symbol,
                 "position_id": pos_id,
-                "comment": comments.get(pos_id, ""),
+                "comment": row[comment_idx].strip(),
+                "entry_price": row[open_id_idx].strip(),
                 "unrealized_profit": profit,
+                "direction": row[type_idx].strip(),
             })
 
     logger.info(
@@ -872,6 +837,7 @@ async def pick_market(
     intervals: list[str] = INTERVALS,
     generate_chart: bool = True,
     generate_position_data: bool = True,
+    generate_position_charts: bool = True,
     include_market_adjustment: bool = True,
     include_trading_session: bool = True,
     include_datetime: bool = True,
@@ -1039,20 +1005,17 @@ async def pick_market(
                         "actual_risk": position_size.data["actual_risk"],
                         "actual_risk_pct": position_size.data["actual_risk_pct"]
                     }
-                    try:
-                        tmp_chart_data = await _generate_chart(
-                            symbol, interval=interval, period=timeframe[1], input_records=records,
-                            entry_price=trade_setups[setup_key]["entry"],
-                            stop_loss_price=trade_setups[setup_key]["stop_loss"],
-                            take_profit_price=trade_setups[setup_key]["take_profit"]
-                        )
-                        trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
-                    except Exception as e:
-                        # generate_chart raises when even a direct MT5 re-fetch
-                        # can't produce fresh bars — keep the valid setup, drop
-                        # only the trade-level chart.
-                        logger.error(f"Failed to generate trade chart for {symbol}: {e}")
-                        trade_setups[setup_key][f"{direction}_chart_path"] = None
+                    if generate_position_charts:
+                        try:
+                            tmp_chart_data = await _generate_chart(
+                                symbol, interval=interval, period=timeframe[1], input_records=records,
+                                entry_price=trade_setups[setup_key]["entry"],
+                                stop_loss_price=trade_setups[setup_key]["stop_loss"],
+                                take_profit_price=trade_setups[setup_key]["take_profit"]
+                            )
+                            trade_setups[setup_key][f"{direction}_chart_path"] = tmp_chart_data["path"]
+                        except Exception as e:
+                            logger.error(f"Failed to generate trade chart for {symbol}: {e}")
             print(trade_setups)
         
         picked_symbol = symbol

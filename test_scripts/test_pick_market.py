@@ -176,7 +176,8 @@ async def main() -> dict:
         response = await asyncio.wait_for(
             client.call_tool("pick_market", {
                 "max_positions": MAX_POSITIONS, 
-                "generate_position_data": False,
+                "generate_position_data": True,
+                "generate_position_charts": False,
                 "include_market_adjustment": False,
                 "include_trading_session": False,
                 "include_datetime": False,
